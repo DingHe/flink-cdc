@@ -40,13 +40,24 @@ import java.util.List;
 import static org.apache.flink.cdc.composer.flink.deployment.ComposeDeployment.REMOTE;
 
 /** Executor for doing the composing and submitting logic for {@link CliFrontend}. */
-public class CliExecutor {
+// 封装了从解析配置到最终提交 Flink 作业的整个流程。
+// 统一配置管理： 接收并存储由 CliFrontend 解析和收集到的所有关键配置信息（流水线定义路径、Flink 配置、全局 CDC 配置、外部 JARs 等）。
+// 确定部署目标： 根据 Flink 配置中的部署目标（如 local, remote, yarn-application, kubernetes-application），选择正确的执行策略。
+// 解析和组合： 负责读取流水线定义文件 (pipeline.yaml)，并使用 PipelineComposer 将其翻译成 Flink 可执行的作业图或部署包。
+// 执行和部署： 协调部署执行器（DeploymentExecutor）或 Flink 管道组合器（PipelineComposer）将作业提交到目标集群或在本地运行。
 
+public class CliExecutor {
+    // 存储 CDC 流水线定义文件（如 pipeline.yaml）在文件系统中的路径。
     private final Path pipelineDefPath;
+    // 存储经过命令行参数覆盖和 Savepoint 设置后的最终 Flink 运行时配置。
     private final org.apache.flink.configuration.Configuration flinkConfig;
+    // 存储从 flink-cdc.yaml 或命令行加载的 Flink CDC 全局配置。
     private final Configuration globalPipelineConfig;
+    // 存储通过命令行指定的、需要在作业运行时添加到 Classpath 的额外 JAR 包的路径列表。
     private final List<Path> additionalJars;
+    // 存储 Flink 安装目录的路径，主要用于 Application 模式部署时定位 Flink 依赖。
     private final Path flinkHome;
+    // 存储原始的命令行解析结果，以便在部署执行器中需要访问原始命令行参数时使用。
     private final CommandLine commandLine;
     private PipelineComposer composer = null;
 
@@ -92,12 +103,17 @@ public class CliExecutor {
             PipelineDeploymentExecutor composeExecutor) throws Exception {
         return composeExecutor.deploy(commandLine, flinkConfig, additionalJars, flinkHome);
     }
-
+    // 负责在 Session 模式（Remote） 或 Local 模式（MiniCluster） 下，执行 Flink CDC 流水线的加载、组合和最终提交。
+    // composer (PipelineComposer): 接收一个 PipelineComposer 实例，它负责将抽象的流水线定义转化为 Flink 特定的执行逻辑。
     private PipelineExecution.ExecutionInfo deployWithComposer(PipelineComposer composer)
             throws Exception {
+        // 流水线定义文件解析
+        // 明确指定使用 YAML 格式来解析用户提供的流水线定义文件。
         PipelineDefinitionParser pipelineDefinitionParser = new YamlPipelineDefinitionParser();
         PipelineDef pipelineDef =
                 pipelineDefinitionParser.parse(pipelineDefPath, globalPipelineConfig);
+        // 使用传入的 PipelineComposer（通常是 FlinkPipelineComposer 的 Session/Local 模式实例）
+        // 将抽象的 PipelineDef 转化为一个可执行的 PipelineExecution 对象。
         PipelineExecution execution = composer.compose(pipelineDef);
         return execution.execute();
     }
@@ -117,27 +133,27 @@ public class CliExecutor {
         PipelineExecution execution = flinkPipelineComposer.compose(pipelineDef);
         execution.execute();
     }
-
+    // 获取composer
     @VisibleForTesting
     void setComposer(PipelineComposer composer) {
         this.composer = composer;
     }
-
+    // 获取最终flink运行的参数
     @VisibleForTesting
     public org.apache.flink.configuration.Configuration getFlinkConfig() {
         return flinkConfig;
     }
-
+    // 获取全局配置
     @VisibleForTesting
     public Configuration getGlobalPipelineConfig() {
         return globalPipelineConfig;
     }
-
+    // 获取其他依赖包
     @VisibleForTesting
     public List<Path> getAdditionalJars() {
         return additionalJars;
     }
-
+    // 获取执行方式
     public String getDeploymentTarget() {
         return flinkConfig.get(DeploymentOptions.TARGET);
     }

@@ -29,8 +29,18 @@ import java.util.Objects;
  *   <li>classpath: Fully-qualified class path of package containing given function.
  * </ul>
  */
+// UdfDef 类的核心作用是以结构化的方式表示 Flink CDC 流水线中需要注册和使用的自定义函数。
+// 在 Flink CDC 流水线中，UDF 允许用户在转换（Transformation）步骤中执行自定义的业务逻辑。
+// UdfDef 存储了查找和调用该函数所需的基本信息。
+// 概括来说，它定义了“自定义函数的名称和位置”：
+// 名称 (Name): 函数在 Flink 运行时环境中注册和被调用的静态方法名称。
+// 类路径 (Classpath): 包含该函数的类的完全限定名（Fully-qualified class path）。
 public class UdfDef {
+    // 用户自定义函数的静态方法名。
+    // 这是在 Flink SQL 或转换表达式中引用该函数时使用的名称。
     private final String name;
+    // 包含该函数的类的完全限定名。
+    // 必需，指定了该函数所在的 Java 类的包路径和类名（例如 com.example.MyFunctions）。这是 Flink 运行时加载和查找该函数的依据。
     private final String classpath;
 
     public UdfDef(String name, String classpath) {

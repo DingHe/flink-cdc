@@ -23,6 +23,7 @@ import java.util.stream.Collectors;
 import static org.apache.flink.cdc.common.utils.Preconditions.checkNotNull;
 
 /** Create deployment methods corresponding to different goals. */
+// flink的部署方式
 public enum ComposeDeployment {
     YARN_SESSION("yarn-session"),
     YARN_APPLICATION("yarn-application"),

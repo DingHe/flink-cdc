@@ -105,6 +105,7 @@ public class CliFrontendOptions {
                                     + "options can be found at https://nightlies.apache.org/flink/flink-docs-stable/ops/config.html")
                     .build();
 
+    // 初始化命令行选项
     public static Options initializeOptions() {
         return new Options()
                 .addOption(HELP)

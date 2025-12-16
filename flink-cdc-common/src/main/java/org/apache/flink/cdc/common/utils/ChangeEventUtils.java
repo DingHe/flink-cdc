@@ -85,12 +85,13 @@ public class ChangeEventUtils {
                         new RenameColumnEvent(tableId, renameColumnEvent.getNameMapping()),
                 truncateTableEvent -> new TruncateTableEvent(tableId));
     }
-
+    // 用于根据用户的“包含”和“排除”列表，计算出最终应该处理的 Schema 变更事件集合。
     public static Set<SchemaChangeEventType> resolveSchemaEvolutionOptions(
             List<String> includedSchemaEvolutionTypes, List<String> excludedSchemaEvolutionTypes) {
         List<SchemaChangeEventType> resultTypes = new ArrayList<>();
 
         for (String includeTag : includedSchemaEvolutionTypes) {
+            // resolveSchemaEvolutionTag将一个标签字符串（includeTag）解析成一个或多个具体的 SchemaChangeEventType 对象列表。例如，如果标签是 "ALL_DDL"，它可能返回包含所有 DDL 类型事件的列表。
             resultTypes.addAll(resolveSchemaEvolutionTag(includeTag));
         }
 

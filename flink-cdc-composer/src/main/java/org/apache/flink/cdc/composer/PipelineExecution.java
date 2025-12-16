@@ -18,9 +18,15 @@
 package org.apache.flink.cdc.composer;
 
 /** A pipeline execution that can be executed by a computing engine. */
+// 表示可执行流水线任务的接口 PipelineExecution
+// 是 Flink CDC 任务定义（PipelineDef）到实际计算引擎（如 Flink Runtime）执行步骤的中间抽象。
+// 核心作用是定义一个可以被计算引擎执行的 Flink CDC 流水线作业的抽象契约。
+// 在 Flink CDC 的任务提交流程中，PipelineComposer (流水线构建器) 会读取用户的抽象定义 PipelineDef，并将其翻译成一个实现了 PipelineExecution 接口的实例。
+// 这个实例随后就可以通过调用 execute() 方法，提交到实际的计算环境（如 Flink 集群）中运行。
 public interface PipelineExecution {
 
     /** Execute the pipeline. */
+    // 作用： 启动流水线的执行过程。
     ExecutionInfo execute() throws Exception;
 
     /** Information of the execution. */

@@ -52,13 +52,28 @@ import static org.apache.flink.cdc.common.pipeline.PipelineOptions.PIPELINE_LOCA
  * file. A definition will be translated to a {@link PipelineExecution} by {@link PipelineComposer}
  * before being submitted to the computing engine.
  */
+// PipelineDef 类的核心作用是聚合和封装 Flink CDC 流水线的所有组件和配置，形成一个完整的、抽象的、可提交的作业定义。
+// 这个类是用户配置的最终形态，它包含了从数据源到数据汇的所有逻辑，以及中间的数据处理规则和运行时配置。
 public class PipelineDef {
+    // 数据源定义。
+    // 流水线的输入端点，包含连接器类型和配置，是必需的。
     private final SourceDef source;
+    // 数据汇定义。
+    // 流水线的输出端点，包含连接器类型和配置，是必需的。
     private final SinkDef sink;
+    // 路由规则列表。
+    // 可选。定义源表到目标表的映射和名称转换规则。
     private final List<RouteDef> routes;
+    // 转换规则列表。
+    // 可选。定义对数据进行过滤、投影和元数据修改的规则。
     private final List<TransformDef> transforms;
+    // 用户自定义函数列表。
+    // 可选。定义需要在转换中使用并注册的自定义函数。
     private final List<UdfDef> udfs;
+    // 模型定义列表。
+    // 可选。定义在流水线中使用的自定义数据处理模型。
     private final List<ModelDef> models;
+    // 流水线配置。 包含了流水线的运行时配置参数，例如并行度、时间语义、时间区域等。在构造时会经过处理，评估时区和运行时模式。
     private final Configuration config;
 
     public PipelineDef(

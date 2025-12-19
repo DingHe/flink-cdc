@@ -72,17 +72,34 @@ import java.util.stream.Collectors;
 import static org.apache.flink.cdc.connectors.mysql.source.assigners.MySqlBinlogSplitAssigner.BINLOG_SPLIT_ID;
 
 /** The source reader for MySQL source splits. */
+// MySqlSourceReader 是 Flink CDC MySQL 连接器的核心组件，
+// 它基于 Flink 的新版 Source API (FLIP-27) 构建。
+// 它继承自 SingleThreadMultiplexSourceReaderBase，意味着它使用单个线程来处理**多个分片（Splits）**的读取。
+// MySqlSourceReader 的核心职责是执行 MySQL 数据的增量快照读取（Incremental Snapshot Reading）
+// 多阶段读取管理：它能够处理两种类型的分片：
+// 快照分片 (Snapshot Split)：用于并行读取历史存量数据。
+// Binlog 分片 (Binlog Split)：用于读取增量变更数据。
+// 状态流转协调：负责在快照阶段结束后，协同 MySqlSplitEnumerator（协调器）切换到 Binlog 读取阶段。
 public class MySqlSourceReader<T>
         extends SingleThreadMultiplexSourceReaderBase<
                 SourceRecords, T, MySqlSplit, MySqlSplitState> {
 
     private static final Logger LOG = LoggerFactory.getLogger(MySqlSourceReader.class);
+    // 保存 MySQL 连接配置、捕获表列表、服务器 ID、时区、增量快照步长等参数。
     private final MySqlSourceConfig sourceConfig;
+    // 记录已读取完成但**尚未收到协调器确认（Ack）**的快照分片。这确保了在发生故障恢复时，这些分片能重新汇报。
     private final Map<String, MySqlSnapshotSplit> finishedUnackedSplits;
+    // 记录元数据不完整的 Binlog 分片。
+    // 在处理大型作业时，Binlog 分片可能需要从协调器多次请求元数据。
     private final Map<String, MySqlBinlogSplit> uncompletedBinlogSplits;
+    // 当前 Reader 所在的并行子任务索引，主要用于日志记录和区分不同的并发实例。
     private final int subtaskId;
+    // 自定义的上下文对象，封装了 Binlog 读取器的挂起/唤醒状态管理。
     private final MySqlSourceReaderContext mySqlSourceReaderContext;
+    // Debezium 的分区标识，通常基于 MySQL 的逻辑名称（Server ID/Name）。
     private final MySqlPartition partition;
+    // 当前被挂起的 Binlog 分片。
+    // 当有新表加入需要先读快照时，当前的 Binlog 读取会暂时保存在这里。
     private volatile MySqlBinlogSplit suspendedBinlogSplit;
 
     public MySqlSourceReader(

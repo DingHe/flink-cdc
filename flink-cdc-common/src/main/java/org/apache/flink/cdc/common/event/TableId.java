@@ -44,12 +44,19 @@ import java.util.Objects;
  *   <li>The mapping relationship for Kafka is: (topic).
  * </ul>
  */
+// Flink CDC 统一架构中非常基础且重要的一个类，用于在分布式系统中唯一地标识一个外部数据集合（如数据库表、Kafka 主题等）
+// TableId 的核心作用是为所有外部数据源提供一个标准化的三段式逻辑路径标识。
+// 由于 Flink CDC 需要支持多种不同的外部系统（如 MySQL, Oracle, Kafka, MongoDB 等），而每种系统对“表”的层级定义都不一样，因此需要一个通用的模型来统一描述这些路径：
+// 统一抽象：无论底层是 库.表 还是 库.模式.表，都映射为 namespace, schemaName, tableName 这三个字段。
 @PublicEvolving
 public class TableId implements Serializable {
-
+    // 顶级命名空间。 对应最外层的层级（如 Oracle 的数据库名）。可选（可为 null）。
     @Nullable private final String namespace;
+    // 模式名称。 对应中间层级（如 MySQL 的数据库名或 Postgres 的 Schema 名）。可选。
     @Nullable private final String schemaName;
+    // 表名/实体名。 对应最底层的实体（如数据库表名或 Kafka Topic）。必填。
     private final String tableName;
+    // 哈希码缓存。 使用 transient 修饰（不参与序列化）。为了提高性能，在第一次计算 hashCode 后将其缓存。
     private transient int cachedHashCode;
 
     private TableId(@Nullable String namespace, @Nullable String schemaName, String tableName) {

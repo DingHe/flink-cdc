@@ -36,17 +36,40 @@ import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 /** The split to describe the binlog of MySql table(s). */
+// MySqlBinlogSplit 是 Flink CDC MySQL 连接器中负责增量日志（Binlog）读取阶段的核心分片类。
+// 在 Flink CDC 的“并行增量快照算法”中，作业会先通过多个 MySqlSnapshotSplit 读取存量数据，最后通过一个 MySqlBinlogSplit 来承接所有的增量变更。
+// 这个类的主要作用是描述如何读取以及从哪里开始读取 MySQL Binlog，它是实现全量与增量无缝衔接的关键：
+// 定义起止位点：记录从 Binlog 的哪个位置（Offset）开始读，读到哪里结束。
+// 维护一致性信息：它持有了所有已完成的快照分片信息（finishedSnapshotSplitInfos）。这对于算法判断哪些 Binlog 记录需要被过滤、哪些需要被应用至关重要。
+// 支持动态加表：通过 isSuspended（挂起）状态和水位线推进逻辑，支持在作业运行过程中动态添加新的表而不丢失数据。
+// 承载表结构：保存读取 Binlog 时所需的最新表结构（Schema）。
+
 public class MySqlBinlogSplit extends MySqlSplit {
     private static final Logger LOG = LoggerFactory.getLogger(MySqlBinlogSplit.class);
     private static final int TABLES_LENGTH_FOR_LOG = 3;
-
+    // 读取起始位点。
+    // 如果是从全量切换过来的，这通常是所有快照分片中最小的高水位位点。
     private final BinlogOffset startingOffset;
+    // 读取结束位点。
+    // 对于流式作业，通常为 null（表示永不停止）；但在某些有限流处理中会指定。
     private final BinlogOffset endingOffset;
+    // 已完成快照信息列表。
+    // 记录了每个快照分片的范围及其对应的高水位。用于 Binlog 与快照数据的去重和对齐。
     private final List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos;
+    // 表结构映射。
+    // 存储 TableId 到 TableChange 的映射，用于解析二进制 Binlog 数据。
     private final Map<TableId, TableChange> tableSchemas;
+    // 预期完成的分片总数。
+    // 用于验证是否所有快照分片都已汇报完毕。
     private final int totalFinishedSplitSize;
+    // 挂起状态标识。
+    // 为 true 时，表示当前 Binlog 读取暂时停止（通常发生在动态增加表时，需要等待新表的快照完成）。
     private final boolean isSuspended;
+    // 日志辅助属性。
+    // 预格式化好的表名字符串，用于在日志打印时只显示前几个表名，防止表太多撑爆日志。
     private final String tablesForLog;
+    // 序列化缓存。
+    // 提高分片在节点间传输时的性能。
     @Nullable transient byte[] serializedFormCache;
 
     public MySqlBinlogSplit(
@@ -179,6 +202,7 @@ public class MySqlBinlogSplit extends MySqlSplit {
     // -------------------------------------------------------------------
     // factory utils to build new MySqlBinlogSplit instance
     // -------------------------------------------------------------------
+    // 向 Binlog 分片中追加新完成的快照信息。
     public static MySqlBinlogSplit appendFinishedSplitInfos(
             MySqlBinlogSplit binlogSplit, List<FinishedSnapshotSplitInfo> splitInfos) {
         // re-calculate the starting binlog offset after the new table added
@@ -206,6 +230,8 @@ public class MySqlBinlogSplit extends MySqlSplit {
      * deleted tables. We need to remove these splits from the total finished split infos and update
      * the size, while also removing the outdated tables from the table schemas of binlog split.
      */
+    // 过滤掉已删除表的陈旧信息。
+    // 当用户修改配置删除了某些表并从 Checkpoint 重启时，此方法负责清理分片内不再需要的表结构和快照信息。
     public static MySqlBinlogSplit filterOutdatedSplitInfos(
             MySqlBinlogSplit binlogSplit, Tables.TableFilter currentTableFilter) {
         Map<TableId, TableChange> filteredTableSchemas =
@@ -250,7 +276,7 @@ public class MySqlBinlogSplit extends MySqlSplit {
                                 - allFinishedSnapshotSplitInfos.size()),
                 binlogSplit.isSuspended());
     }
-
+    // 填充或更新表结构信息。
     public static MySqlBinlogSplit fillTableSchemas(
             MySqlBinlogSplit binlogSplit, Map<TableId, TableChange> tableSchemas) {
         tableSchemas.putAll(binlogSplit.getTableSchemas());
@@ -263,7 +289,7 @@ public class MySqlBinlogSplit extends MySqlSplit {
                 binlogSplit.getTotalFinishedSplitSize(),
                 binlogSplit.isSuspended());
     }
-
+    // 实现 Binlog 读取状态的挂起与恢复。
     public static MySqlBinlogSplit toNormalBinlogSplit(
             MySqlBinlogSplit suspendedBinlogSplit, int totalFinishedSplitSize) {
         return new MySqlBinlogSplit(
@@ -298,6 +324,8 @@ public class MySqlBinlogSplit extends MySqlSplit {
      * @param existedSplitInfos
      * @param currentBinlogReadingOffset
      */
+    // 推进水位线。
+    // 在动态加表场景下，将已有的快照分片的高水位推进到当前的 Binlog 读取位置。这样可以防止作业在恢复后，重复去读那些已经被处理过的陈旧 Binlog。
     private static List<FinishedSnapshotSplitInfo> forwardHighWatermarkToStartingOffset(
             List<FinishedSnapshotSplitInfo> existedSplitInfos,
             BinlogOffset currentBinlogReadingOffset) {

@@ -94,22 +94,33 @@ import java.util.function.Supplier;
  *
  * @param <T> the output type of the source.
  */
+// 核心作用是定义 MySQL 数据的并行捕获逻辑。它不仅仅是一个简单的连接器，其先进性体现在以下几点：
+// 分阶段读取：支持先通过多并行度读取历史存量数据（Snapshot 阶段），然后无缝切换到单并行度读取增量日志（Binlog 阶段）。
+// 无锁设计：引入了 Watermark Signal 算法，在读取存量数据时不需要对数据库加锁（即便不加全局锁，也能保证数据的一致性）
+// 断点续传：支持分片（Split）级别的 Checkpoint，如果任务失败，可以从精确的读取位置恢复，而不需要重新扫描全表。
+// 高并行度：允许用户设置多个并行度来并行扫描大表。
 @Internal
 public class MySqlSource<T>
         implements Source<T, MySqlSplit, PendingSplitsState>, ResultTypeQueryable<T> {
 
     private static final long serialVersionUID = 1L;
-
+    // 分片枚举器使用的服务名称，用于标识内部的 MySQL 连接。
     private static final String ENUMERATOR_SERVER_NAME = "mysql_source_split_enumerator";
-
+    // 配置工厂。 负责根据用户的参数（如 host, user）生成具体的配置对象 MySqlSourceConfig。
     private final MySqlSourceConfigFactory configFactory;
+    // 反序列化器。
+    // 将 Debezium 产生的原始记录转换为用户需要的类型（如 JSON, RowData）。
     private final DebeziumDeserializationSchema<T> deserializationSchema;
+    // 数据发送器提供者。
+    // 用于生成 RecordEmitter，负责将读取到的数据发送到下游算子。
     private final RecordEmitterSupplier<T> recordEmitterSupplier;
 
     // Actions to perform during the snapshot phase.
     // This field is introduced for testing purpose, for example testing if changes made in the
     // snapshot phase are correctly backfilled into the snapshot by registering a pre high watermark
     // hook for generating changes.
+    // 快照钩子。
+    // 主要用于测试，允许在快照阶段（读全量数据时）插入自定义动作（如模拟数据变更）。
     private SnapshotPhaseHooks snapshotHooks = SnapshotPhaseHooks.empty();
 
     /**

@@ -64,6 +64,13 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Debezium event deserializer for {@link SourceRecord}. */
+// 专门负责将 Debezium 产生的 SourceRecord（源记录）深度解析为 Flink CDC Pipeline 架构所需的 Event（事件）。
+// 主要作用是执行 “从数据库原生类型到 Flink 内部类型的深度转换”。
+// 如果说 SourceRecordEventDeserializer（它的父类）定义了分发逻辑，那么这个类就是具体的 “加工车间”。它的核心职责包括：
+// DML 操作映射：将 Debezium 的 op（c, u, d, r）准确映射为 Flink 的 DataChangeEvent（INSERT, UPDATE, DELETE）。
+// 类型推断（Inference）：利用 SchemaDataTypeInference 根据原始数据结构推断出对应的 Flink DataType。
+// 运行时类型转换（Runtime Conversion）：这是最繁重的工作。它内置了大量的转换器（Converters），将 Debezium 产生的 Java 对象（如 Long, byte[], Struct）转换为 Flink 高性能运行时数据结构（如 TimestampData, DecimalData, BinaryStringData）。
+// 支持 Changelog 模式：根据配置决定是否包含更新前的旧数据（Update Before）。
 @Internal
 public abstract class DebeziumEventDeserializationSchema extends SourceRecordEventDeserializer
         implements DebeziumDeserializationSchema<Event> {
@@ -72,14 +79,19 @@ public abstract class DebeziumEventDeserializationSchema extends SourceRecordEve
 
     private static final Logger LOG =
             LoggerFactory.getLogger(DebeziumEventDeserializationSchema.class);
-
+    // 转换器缓存。
+    // 使用 ConcurrentHashMap 存储已创建的转换器，避免为每一条记录重复生成转换逻辑，显著提升性能。
     private static final Map<DataType, DeserializationRuntimeConverter> CONVERTERS =
             new ConcurrentHashMap<>();
 
     /** The schema data type inference. */
+    // 类型推断引擎。
+    // 负责分析 Debezium 的 Schema 并决定将其转换为 Flink 的哪种类型（如 INT, BIGINT 等）
     protected final SchemaDataTypeInference schemaDataTypeInference;
 
     /** Changelog Mode to use for encoding changes in Flink internal data structure. */
+    // 更新模式。
+    // 决定更新操作（UPDATE）是只发送新值（After），还是同时发送旧值（Before）和新值（After）。
     protected final DebeziumChangelogMode changelogMode;
 
     public DebeziumEventDeserializationSchema(
@@ -87,27 +99,34 @@ public abstract class DebeziumEventDeserializationSchema extends SourceRecordEve
         this.schemaDataTypeInference = schemaDataTypeInference;
         this.changelogMode = changelogMode;
     }
-
+    // 调用父类的 deserialize(record) 获取事件列表，并逐一收集到 Flink 的输出流中
     @Override
     public void deserialize(SourceRecord record, Collector<Event> out) throws Exception {
         deserialize(record).forEach(out::collect);
     }
-
+    // 处理 DML 数据变更。
+    // 负责将 Debezium 捕获到的原始数据库记录（SourceRecord）翻译成 Flink CDC 内部定义的 数据变更事件（DataChangeEvent）
     @Override
     public List<DataChangeEvent> deserializeDataChangeRecord(SourceRecord record) throws Exception {
+        // 调用 Debezium 的工具类提取 op 字段。Debezium 的记录中 op 字段代表了数据库的具体动作：c (create/插入)、u (update/更新)、d (delete/删除)、r (read/快照读)。
         Envelope.Operation op = Envelope.operationFor(record);
+        // 确定这条数据属于哪张表。
         TableId tableId = getTableId(record);
-
+        // 获取数据体和对应的结构定义。
         Struct value = (Struct) record.value();
         Schema valueSchema = record.valueSchema();
+        // 提取系统级元数据。
         Map<String, String> meta = getMetadata(record);
-
+        // 处理插入（INSERT）或快照数据（READ）
+        // 如果是 CREATE（增量插入）或 READ（全量快照阶段读取的现有数据）。
         if (op == Envelope.Operation.CREATE || op == Envelope.Operation.READ) {
             RecordData after = extractAfterDataRecord(value, valueSchema);
             return Collections.singletonList(DataChangeEvent.insertEvent(tableId, after, meta));
+        // 处理删除（DELETE）
         } else if (op == Envelope.Operation.DELETE) {
             RecordData before = extractBeforeDataRecord(value, valueSchema);
             return Collections.singletonList(DataChangeEvent.deleteEvent(tableId, before, meta));
+        // 处理更新（UPDATE）—— 最复杂的逻辑
         } else if (op == Envelope.Operation.UPDATE) {
             RecordData after = extractAfterDataRecord(value, valueSchema);
             if (changelogMode == DebeziumChangelogMode.ALL) {

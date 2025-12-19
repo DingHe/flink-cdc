@@ -35,18 +35,25 @@ import java.util.List;
 import java.util.Map;
 
 /** Deserializer to deserialize {@link SourceRecord} to {@link Event}. */
+// 为基于 Debezium 的反序列化器提供一套通用的模板（Template）和骨架。
+// 在 Flink CDC 的 Pipeline 架构中，数据流由统一的 Event 对象组成。然而，许多连接器（如 MySQL、Postgres）底层仍然依赖 Debezium 来获取原始记录（即 SourceRecord）。
+// 模板方法设计模式：它实现了 deserialize 方法的主逻辑（即：判断记录类型 -> 分发给具体的处理函数），而将“如何判断”和“如何解析”的细节留给具体的子类（如 MySqlEventDeserializer）去实现。
+// 分类分发：它将繁杂的原始 SourceRecord 归类为三类：数据变更（DML）、结构变更（DDL）或无意义记录（如心跳）。
+// 屏蔽底层复杂性：它为子类提供了操作 Kafka Connect 数据结构的工具方法，简化了从复杂的嵌套 Struct 中提取信息的过程。
 @Internal
 public abstract class SourceRecordEventDeserializer implements EventDeserializer<SourceRecord> {
 
     private static final long serialVersionUID = 1L;
 
     private static final Logger LOG = LoggerFactory.getLogger(SourceRecordEventDeserializer.class);
-
+    // 这是该类的“心脏”，实现了 EventDeserializer 接口定义的方法。
     @Override
     public List<? extends Event> deserialize(SourceRecord record) throws Exception {
+        // 判断是否为数据变更
         if (isDataChangeRecord(record)) {
             LOG.trace("Process data change record: {}", record);
             return deserializeDataChangeRecord(record);
+         // 判断是否为结构变更
         } else if (isSchemaChangeRecord(record)) {
             LOG.trace("Process schema change record: {}", record);
             return deserializeSchemaChangeRecord(record);
@@ -75,11 +82,11 @@ public abstract class SourceRecordEventDeserializer implements EventDeserializer
 
     /** Get metadata from data change record. */
     protected abstract Map<String, String> getMetadata(SourceRecord record);
-
+    // 从给定的 Schema 对象中获取指定字段名（fieldName）的子 Schema。
     public static Schema fieldSchema(Schema schema, String fieldName) {
         return schema.field(fieldName).schema();
     }
-
+    // 从一个 Struct（结构体对象）中获取指定字段名的子 Struct。
     public static Struct fieldStruct(Struct value, String fieldName) {
         return value.getStruct(fieldName);
     }

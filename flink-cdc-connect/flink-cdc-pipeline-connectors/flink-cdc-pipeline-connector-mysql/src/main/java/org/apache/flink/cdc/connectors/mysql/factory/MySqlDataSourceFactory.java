@@ -106,18 +106,26 @@ import static org.apache.flink.cdc.debezium.utils.JdbcUrlUtils.getJdbcProperties
 import static org.apache.flink.util.Preconditions.checkState;
 
 /** A {@link Factory} to create {@link MySqlDataSource}. */
+// MySQL 连接器的核心工厂类 MySqlDataSourceFactory。它遵循 Java 的 SPI（Service Provider Interface）机制，负责将用户在配置文件或 DDL 中定义的参数转化为可执行的 MySQL 数据源实例。
+// 参数解析与验证：它读取用户定义的 mysql 配置（如主机名、用户名、表名等），并验证参数的合法性（如端口是否为正、并行度是否匹配）。
+// 组件适配：它将 Flink CDC 的抽象配置转换为底层依赖（如 Debezium 或 JDBC）所需的具体属性。
+
 @Internal
 public class MySqlDataSourceFactory implements DataSourceFactory {
 
     private static final Logger LOG = LoggerFactory.getLogger(MySqlDataSourceFactory.class);
-
+    // 唯一标识符，值为 "mysql"。
+    // 当用户在 YAML 配置文件中指定 source.type: mysql 时，Flink 通过此 ID 找到该工厂类。
     public static final String IDENTIFIER = "mysql";
 
+    // 核心入口方法
     @Override
     public DataSource createDataSource(Context context) {
+        // 调用 FactoryHelper 验证传入的配置项是否合法。
         FactoryHelper.createFactoryHelper(this, context)
                 .validateExcept(PROPERTIES_PREFIX, DEBEZIUM_OPTIONS_PREFIX);
 
+        // 获取基础参数：提取 hostname, port, username, password 等。
         final Configuration config = context.getFactoryConfiguration();
         String hostname = config.get(HOSTNAME);
         int port = config.get(PORT);
@@ -131,6 +139,7 @@ public class MySqlDataSourceFactory implements DataSourceFactory {
         ZoneId serverTimeZone = getServerTimeZone(config);
         StartupOptions startupOptions = getStartupOptions(config);
         // Batch mode only supports StartupMode.SNAPSHOT.
+        // 检查如果是 BATCH（批处理）模式，是否只使用了 snapshot 启动方式。
         Configuration pipelineConfiguration = context.getPipelineConfiguration();
         if (pipelineConfiguration != null
                 && pipelineConfiguration.contains(PipelineOptions.PIPELINE_EXECUTION_RUNTIME_MODE)
@@ -189,7 +198,7 @@ public class MySqlDataSourceFactory implements DataSourceFactory {
             // set jdbc config 'tinyInt1isBit' to false
             configMap.put(PROPERTIES_PREFIX + PropertyKey.tinyInt1isBit.getKeyName(), "false");
         }
-
+        // 构建配置工厂：实例化 MySqlSourceConfigFactory，并将几十个配置项（连接池、切片大小、超时时间等）填充进去。
         MySqlSourceConfigFactory configFactory =
                 new MySqlSourceConfigFactory()
                         .hostname(hostname)
@@ -220,6 +229,7 @@ public class MySqlDataSourceFactory implements DataSourceFactory {
                         .useLegacyJsonFormat(useLegacyJsonFormat)
                         .assignUnboundedChunkFirst(isAssignUnboundedChunkFirst);
 
+        // 处理表过滤：根据 tables 和 tables.exclude 选项，解析出最终需要捕获的表列表。
         List<TableId> tableIds = MySqlSchemaUtils.listTables(configFactory.createConfig(0), null);
 
         if (scanBinlogNewlyAddedTableEnabled && scanNewlyAddedTableEnabled) {
@@ -254,7 +264,7 @@ public class MySqlDataSourceFactory implements DataSourceFactory {
             }
             configFactory.tableList(capturedTables.toArray(new String[0]));
         }
-
+        // 处理元数据：解析用户需要读取的额外列（如数据库名、操作类型等）
         String chunkKeyColumns = config.get(SCAN_INCREMENTAL_SNAPSHOT_CHUNK_KEY_COLUMN);
         if (chunkKeyColumns != null) {
             Map<ObjectPath, String> chunkKeyColumnMap = new HashMap<>();
@@ -284,6 +294,7 @@ public class MySqlDataSourceFactory implements DataSourceFactory {
         }
         String metadataList = config.get(METADATA_LIST);
         List<MySqlReadableMetadata> readableMetadataList = listReadableMetadata(metadataList);
+        // 返回实例：最后通过 new MySqlDataSource(...) 完成创建。
         return new MySqlDataSource(configFactory, readableMetadataList);
     }
 

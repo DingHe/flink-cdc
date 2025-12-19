@@ -40,20 +40,33 @@ import java.util.Objects;
  * from a specific {@link BinlogOffset}, we need to skip the processed change events and the
  * processed rows.
  */
+// BinlogOffset 类是 Flink CDC MySQL 连接器中用于描述 MySQL 二进制日志（Binlog）读取位点 的核心数据结构。
+// 精确的地理位置：它不仅仅记录 Binlog 的文件名和位置，还包含 GTID（全局事务 ID）、事务内跳过的事件数和行数。
+// 断点续传（容错性）：当 Flink 作业发生故障重启时，Source 会从 Checkpoint 中恢复此对象，定位到 MySQL Binlog 的精确位置继续读取，确保 Exactly-Once（精确一次） 语义。
+// 细粒度恢复：MySQL 一个事务可能包含多个事件（Events），一个事件可能包含多行数据。该类记录了 events_to_skip 和 rows_to_skip，确保在事务中间崩溃后，重启时能跳过已处理的行。
+// 位点对比：通过实现 Comparable 接口，它能判断两个位点的先后顺序，这在处理快照与增量阶段切换（Watermark 算法）时至关重要。
+
 @PublicEvolving
 public class BinlogOffset implements Comparable<BinlogOffset>, Serializable {
 
     private static final long serialVersionUID = 1L;
-
+    // Binlog 文件名（如 mysql-bin.000001）
     public static final String BINLOG_FILENAME_OFFSET_KEY = "file";
+    // Binlog 文件内的字节偏移位置。
     public static final String BINLOG_POSITION_OFFSET_KEY = "pos";
+    // 在当前 Binlog 位置处，需要跳过的事件数量。
     public static final String EVENTS_TO_SKIP_OFFSET_KEY = "event";
+    // 在当前事件内，需要跳过的行数量。
     public static final String ROWS_TO_SKIP_OFFSET_KEY = "row";
+    // MySQL 的 GTID 集合字符串
     public static final String GTID_SET_KEY = "gtids";
+    // 该位点对应的秒级时间戳。
     public static final String TIMESTAMP_KEY = "ts_sec";
+    // 产生该日志的 MySQL 服务器 ID。
     public static final String SERVER_ID_KEY = "server_id";
+    // 位点类型标识
     public static final String OFFSET_KIND_KEY = "kind";
-
+    // 实际存储位点信息的容器。采用 Map 结构是为了兼容 Debezium 的内部位点存储格式。
     private final Map<String, String> offset;
 
     // ------------------------------- Builders --------------------------------

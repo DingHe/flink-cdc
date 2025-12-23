@@ -43,6 +43,13 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 /** Schema of a table or data collection. */
+// Schema 类是 Flink CDC 框架中用于描述表结构或数据集结构的核心类。它是一个不可变（Immutable）的对象，封装了列信息、主键、分区键、表参数以及备注等元数据。
+// 结构定义：详细描述一张表有哪些列（物理列或元数据列）、每列的数据类型以及是否为主键。
+// 序列化支持：它实现了 Serializable 接口，允许在 Flink 算子之间、甚至是网络中进行传输和持久化（Checkpoint）。
+// 类型转换桥梁：提供了将列集合转换为 Flink 内部 RowType 的能力，方便算子进行二进制数据的解析与封装。
+// 元数据管理：不仅包含列信息，还承载了表级别的配置参数（Options）和注释（Comment）。
+
+
 @PublicEvolving
 public class Schema implements Serializable {
 

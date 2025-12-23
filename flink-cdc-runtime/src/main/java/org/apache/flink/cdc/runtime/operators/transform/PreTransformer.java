@@ -24,6 +24,9 @@ import javax.annotation.Nullable;
 import java.util.Optional;
 
 /** Pre-Transformation rule used by {@link PreTransformOperator}. */
+// PreTransformer 的作用就是将Flink CDC 的 YAML 配置在代码层面实例化。
+// 它是一个“规则束”，将“哪些表需要变（Selectors）”、“列怎么变（Projection）”以及“哪些行要留（Filter）”这三个逻辑封装在一起。
+// 之所以称为 Pre（预），是因为这些操作通常发生在数据流进入核心 Schema 演化处理或写入 Sink 之前的阶段。
 public class PreTransformer {
     private final Selectors selectors;
 

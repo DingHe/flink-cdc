@@ -38,11 +38,24 @@ import java.util.Optional;
  *   <li>columnNames: a list for recording the name of all columns used by the filter expression.
  * </ul>
  */
+// TransformFilter 是 Flink CDC 转换算子（Transform Operator）中专门用于处理 行级过滤（Row Filtering） 逻辑的描述类。它负责存储和管理用户定义的过滤条件，并将其从“人类可读的表达式”转换为“机器可执行的代码脚本”。
+// 在 Flink CDC 的数据流中，TransformFilter 扮演着“安检员”的角色：
+// 承载过滤定义：存储用户在 YAML 配置文件中编写的过滤表达式（例如 age > 18 AND status = 'active'）。
+// 表达式转换：将类 SQL 的过滤表达式转换为 Janino（一种高性能 Java 编译器）能够运行的脚本表达式。
+// 依赖追踪：记录过滤条件中引用了哪些原始列（ColumnNames），以便算子在运行时准确提取数据进行计算。
+// 提供运行元数据：为转换算子提供在运行时判定一行数据是否该被保留（Keep）或丢弃（Drop）的所有必要信息。
 public class TransformFilter implements Serializable {
     private static final long serialVersionUID = 1L;
+    // 存储用户输入的原始过滤表达式
     private final String expression;
+    // 存储转换后的 Java/Janino 脚本表达式。
+    // 由于原始表达式不能直接运行，解析器会将其中的列名替换为变量，并将运算符转换为 Java 语法。
     private final String scriptExpression;
+    // 过滤条件中涉及到的所有列名列表。
+    // 算子需要根据这个列表从二进制数据中提前提取出对应的字段值。
     private final List<String> columnNames;
+    // 存储原始列名与脚本中使用的变量名之间的映射关系。
+    // 防止列名中包含特殊字符（如空格、连字符）导致脚本解析错误，通常会将列名映射为安全的内部变量（如 arg0, arg1）。
     private final Map<String, String> columnNameMap;
 
     public TransformFilter(

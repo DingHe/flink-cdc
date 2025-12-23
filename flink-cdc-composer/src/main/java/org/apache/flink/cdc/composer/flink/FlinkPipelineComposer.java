@@ -182,6 +182,7 @@ public class FlinkPipelineComposer implements PipelineComposer {
                 sourceTranslator.translate(pipelineDef.getSource(), dataSource, env, parallelism);
 
         // Source ---> PreTransform
+        // 解析出引用的所有列，然后生成所有列组成的schema的数据记录
         stream =
                 transformTranslator.translatePreTransform(
                         stream,
@@ -192,6 +193,7 @@ public class FlinkPipelineComposer implements PipelineComposer {
                         !isParallelMetadataSource && !isBatchMode);
 
         // PreTransform ---> PostTransform
+        // 执行数据的转换规则
         stream =
                 transformTranslator.translatePostTransform(
                         stream,

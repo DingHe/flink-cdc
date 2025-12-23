@@ -31,16 +31,28 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 /** Descriptor of a UDF function. */
+// 专门用于管理和描述用户在数据转换（Transform）过程中使用的自定义函数（UDF）。
+// 在 Flink CDC 的 Pipeline 定义中，用户可以使用自定义函数来处理字段。该类的主要作用包括：
+// 元数据持有者：保存 UDF 的注册名称、全类名（Classpath）、初始化参数等信息。
+// 类型兼容性桥梁：Flink CDC 支持两种 UDF：
+// CDC Pipeline UDF（实现 CDC 自己的接口）。
+// Flink ScalarFunction（传统的 Flink 自定义函数）。 该类负责识别并适配这两者。
+// 运行时发现：在算子初始化阶段，利用 Java 反射机制实例化 UDF，并自动探测函数的返回值类型（Return Type）。
 @Internal
 public class UserDefinedFunctionDescriptor implements Serializable {
 
     private static final long serialVersionUID = 1L;
-
+    // UDF 在表达式中使用的别名（如 my_func）。
     private final String name;
+    // UDF 类的全限定名（如 com.example.MyUpperFunction）
     private final String classpath;
+    // 仅包含类名，不包含包路径。由 classpath 截取而来。
     private final String className;
+    // 返回值类型提示。对于实现 CDC 接口的 UDF，它会记录函数返回的数据类型（如 STRING, INT 等）。
     private final DataType returnTypeHint;
+    // rue: 表示该类实现了 UserDefinedFunction 接口。
     private final boolean isCdcPipelineUdf;
+    // parameters (Map<String, String>): 初始化参数。存储在配置中定义的键值对，用于在运行时动态配置 UDF。
     private final Map<String, String> parameters;
 
     public UserDefinedFunctionDescriptor(String name, String classpath) {

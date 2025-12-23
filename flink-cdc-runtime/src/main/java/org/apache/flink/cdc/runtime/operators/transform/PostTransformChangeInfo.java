@@ -34,17 +34,31 @@ import java.util.Map;
  * PostTransformChangeInfo caches pre-transformed / pre-transformed schema, schema field getters,
  * and binary record data generator for post-transform schema.
  */
+
+// PostTransformChangeInfo 的主要作用是 “桥接转换前后的结构” 并提供 “高性能访问接口”
+// Schema 状态快照：同时保存了进入该算子时的 Schema（Pre-transformed）和离开该算子时的 Schema（Post-transformed）
+// 访问加速：将列名与索引（Index）的映射关系预先存入 Map，避免在处理每行记录时都去遍历 Schema。
+// 读写工具缓存：预先创建好从二进制行数据中读取字段的 FieldGetter，以及将计算结果序列化回二进制格式的 BinaryRecordDataGenerator。
+
 public class PostTransformChangeInfo {
-
+    // 标识该元数据属于哪张表（包含数据库、表名等）。
     private final TableId tableId;
-
+    // 进入后置转换算子前的表结构。
     private final Schema preTransformedSchema;
+    // 经过用户规则（投影、计算列、UDF）处理后的最终表结构。
     private final Schema postTransformedSchema;
+    // 加速用：记录原始列名到其在数组中位置的映射，
+    // 方便表达式引擎快速通过列名查找数据。
     private final Map<String, Integer> preTransformedSchemaFieldNameToIndexMap;
-
+    // 核心读工具：针对原始 Schema 生成的字段获取器。
+    // 可以直接从 BinaryRecordData 中高效提取特定位置的 Java 对象。
     private final RecordData.FieldGetter[] preTransformedFieldGetters;
+    // 针对最终 Schema 生成的字段获取器（通常用于处理后的校验或二次读取）。
     private final RecordData.FieldGetter[] postTransformedFieldGetters;
+    // 核心写工具：根据最终 Schema 生成。
+    // 负责将转换计算后的 Java 对象数组（Object[]）重新打包成 Flink 内部的高性能二进制格式。
     private final BinaryRecordDataGenerator postTransformedRecordDataGenerator;
+    // 加速用：记录最终输出列名到其索引位置的映射。
     private final Map<String, Integer> postTransformedSchemaFieldNameToIndexMap;
 
     public static PostTransformChangeInfo of(

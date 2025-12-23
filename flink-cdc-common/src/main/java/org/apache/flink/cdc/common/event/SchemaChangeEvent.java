@@ -25,9 +25,13 @@ import java.io.Serializable;
  * Class {@code SchemaChangeEvent} represents the changes in the table structure of the external
  * system, such as CREATE, DROP, RENAME and so on.
  */
+// DDL 事件抽象：它将各种复杂的数据库结构操作（如建表、删表、增加列、修改列名等）统一抽象为一种事件类型。
+// Schema 演进（Schema Evolution）驱动：它是 Flink CDC 实现“自动同步表结构变更”的基石。当上游数据库执行了 DDL，该事件会流向下游，通知 Transform 算子更新内部缓存，或通知 Sink 算子在目标端同步修改表结构。
+// 拓扑解耦：通过接口定义，Flink CDC 框架可以统一处理来自不同数据库的结构变更，而不需要关心底层数据库具体的 SQL 语法。
 @PublicEvolving
 public interface SchemaChangeEvent extends ChangeEvent, Serializable {
     /** Returns its {@link SchemaChangeEventType}. */
+    // 获取该结构变更的具体类型。
     SchemaChangeEventType getType();
 
     /** Creates a copy of {@link SchemaChangeEvent} with new {@link TableId}. */

@@ -45,12 +45,30 @@ import java.util.Map;
  *       expression.
  * </ul>
  */
+// Flink CDC 转换（Transform）框架中用于描述目标表单个列转换逻辑的核心实体类。它承载了从源表字段到目标表字段的映射关系、计算逻辑以及元数据信息。
+// 在 Flink CDC 的 projection（投影）处理过程中，用户定义的每一个输出列都会对应一个 ProjectionColumn 实例。它的主要作用包括：
+// 定义目标列元数据：规定了转换后该列的名称、数据类型（DataType）以及是否为主键等信息。
+// 区分转换类型：它能识别并处理三种不同类型的转换：
+// 直接透传：原封不动地引用源表字段。
+// 别名转换：仅仅改变字段名称，不改变值逻辑（AS 语法）。
+// 计算列转换：通过表达式、函数或数学运算生成新值。
+// 连接计算引擎：它存储了经过解析和翻译后的 Janino 脚本表达式（Java 代码片段），供算子在运行时动态编译并执行计算。
+
 public class ProjectionColumn implements Serializable {
     private static final long serialVersionUID = 1L;
+    // 存储目标列的物理结构信息。
+    // 包含：列名、数据类型、是否允许为空、长度等。它是构建下游目标表 Schema 的直接依据。
     private final Column column;
+    // 存储用户在投影配置中定义的原始表达式。
+    // 在 age + 1 AS new_age 中，expression 可能是 age + 1
     private final String expression;
+    // 存储转换后的 Java/Janino 脚本代码。
+    // 算子不会直接运行 SQL 表达式，而是运行这里的 Java 代码片段。例如 age + 1 可能会被翻译成 arg0 + 1（arg0 是变量映射）
     private final String scriptExpression;
+    // 记录该列计算时依赖的所有原始源表列名。
     private final List<String> originalColumnNames;
+    // 维护原始列名与脚本中变量名的映射关系。
+    // 确保在生成的 Java 脚本中，变量能准确引用到对应的字段值（防止因字段名特殊字符导致的语法错误）。
     private final Map<String, String> columnNameMap;
 
     public ProjectionColumn(
@@ -103,6 +121,8 @@ public class ProjectionColumn implements Serializable {
         return TransformException.prettyPrintColumnNameMap(getColumnNameMap());
     }
 
+    // 判断这是否是一个需要执行逻辑转换的列。
+    // 如果 scriptExpression 不为空，说明需要经过计算引擎处理。
     public boolean isValidTransformedProjectionColumn() {
         return !StringUtils.isNullOrWhitespaceOnly(scriptExpression);
     }
@@ -112,6 +132,9 @@ public class ProjectionColumn implements Serializable {
      * Just like column {@code id} in {@code id, name AS new_name, age + 1 AS new_age}. <br>
      * Comments and default expressions will be intact.
      */
+    // 直接透传。
+    // 例如 SELECT id
+    // 会保留原始列的所有属性（如注释、默认值）
     public static ProjectionColumn ofForwarded(Column column, String mappedColumnName) {
         String name = column.getName();
         Map<String, String> columnNameMap = Collections.singletonMap(name, mappedColumnName);
@@ -124,6 +147,8 @@ public class ProjectionColumn implements Serializable {
      * Just like column {@code new_name} in {@code id, name AS new_name, age + 1 AS new_age}. <br>
      * Comments and default expressions will be intact.
      */
+    // 简单的别名映射。
+    // 例如 SELECT name AS nick_name
     public static ProjectionColumn ofAliased(
             Column column, String newName, String mappedColumnName) {
         String originalName = column.getName();
@@ -142,6 +167,8 @@ public class ProjectionColumn implements Serializable {
      * Just like column {@code new_age} in {@code id, name AS new_name, age + 1 AS new_age}. <br>
      * No comments nor default expressions will be kept.
      */
+    // 复杂的计算列。
+    // 例如 SELECT UPPER(name), age * 2
     public static ProjectionColumn ofCalculated(
             String columnName,
             DataType dataType,

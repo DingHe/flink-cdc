@@ -42,13 +42,26 @@ import java.util.Map;
  * PreTransformChangeInfo caches source / pre-transformed schema, source schema field getters, and
  * binary record data generator for pre-transform schema.
  */
+// PreTransformChangeInfo 是 Flink CDC 转换算子（Transform Operator）中的一个关键元数据缓存类。它封装了从“源表结构”到“转换后结构”所需的所有工具对象。
+// 在 Flink CDC 的转换流程中，当一条数据流经 PreTransformOperator 时，算子需要知道：
+// 原始长什么样：源表的 Schema。
+// 转换后长什么样：经过列裁剪或初步计算后的 Schema。
+// 如何取数：如何从原始的 RecordData 中根据字段名快速提取值。
+// 如何存数：如何高效地生成转换后的二进制行数据。
+// 该类将这些高频使用的、计算开销较大的工具对象（如 FieldGetter 和 Generator）整合在一起并进行缓存，从而避免对每一条数据都重新创建对象，极大提升了处理性能。
 public class PreTransformChangeInfo {
+    // 标识该信息属于哪张表（包含库名、表名）
     private final TableId tableId;
+    // 源表的原始结构定义。
     private final Schema sourceSchema;
+    // 预转换，表达式实际引用的所有列组成的schema
     private final Schema preTransformedSchema;
+    // 建立字段名到提取器的映射。
+    // 在执行计算表达式（如 age + 1）时，系统通过这个 Map 快速定位到原始数据中 age 列的提取逻辑。
     private final Map<String, RecordData.FieldGetter> sourceFieldGettersMap;
+    // 用于将转换后的结果（Object数组）重新编码为二进制格式。
     private final BinaryRecordDataGenerator preTransformedRecordDataGenerator;
-
+    // 静态常量，该类的专用序列化器，用于在 Flink 状态（State）存取时进行序列化。
     public static final PreTransformChangeInfo.Serializer SERIALIZER =
             new PreTransformChangeInfo.Serializer();
 

@@ -35,9 +35,18 @@ import java.util.Optional;
  *   <li>projectionColumns: a list for recording all columns transformation of the projection.
  * </ul>
  */
+// TransformProjection 是 Flink CDC 转换引擎中用于描述 “投影变换”（Projection） 的核心类。在数据处理领域，投影通常指从源数据中选择特定列、删除不需要的列，或者通过表达式计算生成新列的操作。
+// 在 Flink CDC Pipeline 的 transform 配置中，用户可以通过 projection 参数定义输出结果的样式。该类的具体作用如下：
+// 定义输出结构：它承载了用户定义的 SQL 式投影表达式（如 id, name, age + 1 AS next_age）。
+// 存储列级转换信息：它不仅保存原始的投影字符串，还持有一个解析后的列转换列表（ProjectionColumn），这决定了最终输出的 Schema 包含哪些字段。
+// 转换逻辑的载体：它是转换算子识别“如何裁剪列”和“如何新增计算列”的依据。
 public class TransformProjection implements Serializable {
     private static final long serialVersionUID = 1L;
+    // 存储原始的投影字符串。
     private final String projection;
+    // 存储经过解析后的详细列转换对象列表。
+    // 每个 ProjectionColumn 包含了该列是原始列还是计算列、表达式是什么、目标类型是什么等关键元数据。
+    // 这是构建目标表 Schema 的核心依据。
     private final List<ProjectionColumn> projectionColumns;
 
     public TransformProjection(String projection, List<ProjectionColumn> projectionColumns) {

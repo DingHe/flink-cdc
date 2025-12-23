@@ -38,9 +38,14 @@ import java.util.Map;
  *   <li>DataChangeEvent: omits unused columns in data row.
  * </ul>
  */
+// PreTransformProcessor 是 Flink CDC 转换算子（Transform Operator）中的数据“剥离”处理器。
+// 它主要负责执行转换流水线中的第一步：根据用户的投影和过滤规则，剔除那些下游完全不需要的原始列。
+// 结构精简 (Schema Peeling)：当捕获到建表事件（CreateTableEvent）时，它会检查哪些列在 projection（投影）或 filter（过滤）中被引用了。没被用到的列会被直接从 Schema 中删除。
+// 数据裁剪 (Data Trimming)：对于每一行增量数据（DataChangeEvent），它只提取那些“有用”的列，并将它们转换成一种更紧凑的、预处理过的 BinaryRecordData 格式。
+// 性能优化：通过在早期剔除 D、E 等无关列（如代码注释中的例子），减少了后续计算引擎的内存占用和 CPU 处理开销。
 public class PreTransformProcessor {
     private final PreTransformChangeInfo tableChangeInfo;
-
+    // 初始化处理器，将计算好的元数据信息注入处理器。
     public PreTransformProcessor(PreTransformChangeInfo tableChangeInfo) {
         this.tableChangeInfo = tableChangeInfo;
     }
@@ -52,6 +57,7 @@ public class PreTransformProcessor {
      * will be sent to downstream, and (D, E) column along with corresponding data will be trimmed.
      */
     public CreateTableEvent preTransformCreateTableEvent(CreateTableEvent createTableEvent) {
+        // 从原始事件中获取 Schema。
         Schema schema =
                 createTableEvent
                         .getSchema()
@@ -60,14 +66,19 @@ public class PreTransformProcessor {
     }
 
     public BinaryRecordData processFillDataField(BinaryRecordData data) {
+        // 创建一个 valueList 用于临时存放字段值。
         List<Object> valueList = new ArrayList<>();
+        // 获取预转换后 Schema 中的所有列（这些是我们需要保留的列）
         List<Column> columns = tableChangeInfo.getPreTransformedSchema().getColumns();
+        // 从 sourceFieldGettersMap 中通过列名找到对应的“提取器（FieldGetter）
         Map<String, RecordData.FieldGetter> sourceFieldGettersMap =
                 tableChangeInfo.getSourceFieldGettersMap();
+        // 循环获取列对应的值放入valueList
         for (Column column : columns) {
             RecordData.FieldGetter fieldGetter = sourceFieldGettersMap.get(column.getName());
             valueList.add(fieldGetter.getFieldOrNull(data));
         }
+        // 生成新的二进制编码记录
         return tableChangeInfo
                 .getPreTransformedRecordDataGenerator()
                 .generate(valueList.toArray(new Object[0]));

@@ -78,10 +78,17 @@ import static org.apache.flink.cdc.common.types.DataTypeChecks.getScale;
  *
  * <p>Nullability is always handled by the container data structure.
  */
+// 定义了如何访问一行“变更数据”的标准方式。它是 Flink CDC 内部对数据库“行（Row）”的抽象，类似于数据库中的记录
+// 在 CDC 系统中，捕获到的变更（如 MySQL 的 Binlog）最终需要转化成 Flink 能够高效处理的内部格式。RecordData 的作用包括：
+// 屏蔽底层存储差异：无论底层是 BinaryRecordData（二进制字节）还是普通的 GenericRecordData（对象数组），都通过一套统一的 getXXX 接口对外暴露数据。
+// 高性能数据读写：它定义了一系列针对基本类型的访问方法（如 getInt, getLong），避免了 Java 对象的装箱和拆箱开销。
+// 类型映射规范：它确立了 SQL 数据类型到 Flink 内部数据结构（Internal Data Structures）的映射标准（见代码中的表格），确保了数据在不同算子间传输的一致性。
+// 由于这是一个接口，它主要定义了一系列 只读访问器（Read-only accessors）。
 @PublicEvolving
 public interface RecordData {
 
     /** Returns the number of fields in this record. */
+    // 返回记录中的字段总数（列数）
     int getArity();
 
     // ------------------------------------------------------------------------------------------
@@ -89,6 +96,7 @@ public interface RecordData {
     // ------------------------------------------------------------------------------------------
 
     /** Returns true if the field is null at the given position. */
+    // 检查指定位置（pos）的字段是否为 NULL
     boolean isNullAt(int pos);
 
     /** Returns the boolean value at the given position. */

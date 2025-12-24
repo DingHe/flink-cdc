@@ -203,6 +203,7 @@ public class FlinkPipelineComposer implements PipelineComposer {
                         pipelineDef.getModels(),
                         dataSource.supportedMetadataColumns());
 
+        // 用于判断数据源是否支持并行处理元数据（如分库分表场景）。
         if (isParallelMetadataSource) {
             // Translate a distributed topology for sources with distributed tables
             // PostTransform -> Partitioning

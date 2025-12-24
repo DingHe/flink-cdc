@@ -26,11 +26,15 @@ import java.util.Objects;
  * A wrapper around {@link Event}, which contains the target partition number and will be used in
  * {@link EventPartitioner}.
  */
+// PartitioningEvent 的核心作用是 “给 CDC 事件打标签以实现精准分区”。
+// 在 Flink 算子之间传输数据时，如果直接传输原始 Event（如 DataChangeEvent），Flink 的分区器（Partitioner）往往需要重新解析事件内容才能决定发往哪个并行子任务，这会带来性能损耗。
+// PartitioningEvent 通过装饰器模式封装了原始事件，并额外携带了“目标分区号（Target Partition）”：
+// 路由导向：它显式告诉 EventPartitioner 这条数据应该去往哪个下游 Subtask。
 @Internal
 public class PartitioningEvent implements Event {
-    private final Event payload;
-    private final int sourcePartition;
-    private final int targetPartition;
+    private final Event payload;  // 实际携带的“货物”
+    private final int sourcePartition;  // 标识该事件来自上游哪个并行子任务（Subtask ID）
+    private final int targetPartition; // 标识该事件应该去往哪个下游并行子任务。
 
     /**
      * For partitioning events with regular topology, source partition information is not necessary.

@@ -52,19 +52,33 @@ import static org.apache.flink.cdc.common.utils.Preconditions.checkArgument;
  * Schema manager handles schema changes for tables, and manages historical schema versions of
  * tables.
  */
+// SchemaManager 是元数据管理的核心组件，扮演着“内存元数据数据库”的角色。它负责维护所有表的结构（Schema）及其历史版本
+// 主要解决以下三个问题
+// 多版本管理：记录表结构从 Version 0 到 Version N 的每一次演进过程。由于分布式系统中数据流和元数据变更可能存在延迟，它允许下游算子查询旧版本的 Schema 以正确解析“滞后”的数据。
+// 双层模型支持：
+// Original Schema (原始结构)：捕获自上游数据源（如 MySQL）的最真实结构。
+// Evolved Schema (演化结构)：经过路由转换、计算或合并后，映射到目标端（如 Doris/Kafka）的结构。
+// 状态持久化：支持 Flink 的 Checkpoint。当作业重启时，它能通过内置的 Serializer 恢复所有的历史 Schema 信息，保证元数据不丢失。
 @Internal
 public class SchemaManager {
+    // 默认的初始版本号
     private static final int INITIAL_SCHEMA_VERSION = 0;
+    // 缓存策略限制。
+    // 为了防止内存溢出，每个表只保留最近的 3 个版本（旧版本在数据完全消耗后不再需要）
     private static final int VERSIONS_TO_KEEP = 3;
+    // 指定 Schema 变更的策略（如 EVOLVE 同步演进、IGNORE 忽略等）
     private final SchemaChangeBehavior behavior;
 
     // Serializer for checkpointing
+    // 用于将整个管理器序列化为字节流存入 Checkpoint
     public static final Serializer SERIALIZER = new Serializer();
 
     // Schema management
+    // 存储源表的版本化结构。Key 是表 ID，Value 是一个按版本号排序的 Map
     private final Map<TableId, SortedMap<Integer, Schema>> originalSchemas;
 
     // Schema management
+    // 存储目标表的版本化结构。
     private final Map<TableId, SortedMap<Integer, Schema>> evolvedSchemas;
 
     public SchemaManager() {
@@ -87,7 +101,7 @@ public class SchemaManager {
     public SchemaChangeBehavior getBehavior() {
         return behavior;
     }
-
+    // 检查指定的表是否已经注册了结构信息。
     public final boolean schemaExists(
             Map<TableId, SortedMap<Integer, Schema>> schemaMap, TableId tableId) {
         return schemaMap.containsKey(tableId) && !schemaMap.get(tableId).isEmpty();
@@ -106,6 +120,7 @@ public class SchemaManager {
     }
 
     /** Get the latest evolved schema of the specified table. */
+    // 获取指定表最新版本的结构
     public Optional<Schema> getLatestEvolvedSchema(TableId tableId) {
         return getLatestSchemaVersion(evolvedSchemas, tableId)
                 .map(version -> evolvedSchemas.get(tableId).get(version));
@@ -118,6 +133,7 @@ public class SchemaManager {
     }
 
     /** Get schema at the specified version of a table. */
+    // 获取指定表特定版本的结构。如果版本已被清理或不存在，会抛出异常。
     public Schema getEvolvedSchema(TableId tableId, int version) {
         checkArgument(
                 evolvedSchemas.containsKey(tableId),
@@ -133,6 +149,7 @@ public class SchemaManager {
     }
 
     /** Get schema at the specified version of a table. */
+    // 获取指定表特定版本的结构。如果版本已被清理或不存在，会抛出异常。
     public Schema getOriginalSchema(TableId tableId, int version) {
         checkArgument(
                 originalSchemas.containsKey(tableId),
@@ -148,10 +165,13 @@ public class SchemaManager {
     }
 
     /** Apply schema change to a table. */
+    // 结构变更应用 (核心业务逻辑)
     public void applyOriginalSchemaChange(SchemaChangeEvent schemaChangeEvent) {
+        // 如果是 CreateTableEvent，直接注册新表。
         if (schemaChangeEvent instanceof CreateTableEvent) {
             handleCreateTableEvent(originalSchemas, ((CreateTableEvent) schemaChangeEvent));
         } else {
+        // 如果是其他 DDL（如加列），先获取最新 Schema，调用 SchemaUtils 生成新 Schema，并递增版本号存储。
             Optional<Schema> optionalSchema = getLatestOriginalSchema(schemaChangeEvent.tableId());
             checkArgument(
                     optionalSchema.isPresent(),

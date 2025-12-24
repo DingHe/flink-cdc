@@ -39,17 +39,34 @@ import java.util.stream.Collectors;
  * Calculates how upstream data change events should be dispatched to downstream tables. Returns one
  * or many destination Table IDs based on provided routing rules.
  */
+// TableIdRouter（表 ID 路由处理器）扮演着“交通指挥官”的角色。
+// 它决定了上游采集到的数据事件（Data Events）和结构变更事件（Schema Events）最终应该流向哪一个或哪几个目标表。
+// TableIdRouter 的核心作用是实现 “逻辑表到物理表”的映射。它的具体职责包括：
+// 映射计算：根据用户定义的路由规则（Route Rules），将原始的 sourceTableId 转换为目标端的 sinkTableId。
+// 分表合并支持：支持将多个满足正则匹配的源表（如 order_01, order_02）合并路由到同一个目标表（如 order_all）。
+// 动态表名替换：支持通过占位符（replaceSymbol）动态生成目标表名。
+// 性能优化：通过 Guava Cache 缓存路由结果，避免对每一条 CDC 数据都进行昂贵的正则表达式匹配计算。
+// 逻辑分组：为 Schema 演进提供支持，将属于同一条路由规则的源表归为一组，以便后续进行“加宽表”合并。
 public class TableIdRouter {
-
+    // 存储解析后的路由规则。
+    // f0 (Selectors)：基于正则的过滤器，用于判断源表 ID 是否匹配此规则。
+    // f1 (String)：目标表的标识符字符串。
+    // f2 (String)：替换占位符（replaceSymbol），用于动态替换逻辑。
     private final List<Tuple3<Selectors, String, String>> routes;
+    // 路由结果缓存。
+    // Key 是源表 ID，Value 是对应的目标表 ID 列表。
     private final LoadingCache<TableId, List<TableId>> routingCache;
+    // 静态常量，设置为 1 天。
+    // 表示路由结果在缓存中 24 小时未访问后失效，防止内存无限膨胀。
     private static final Duration CACHE_EXPIRE_DURATION = Duration.ofDays(1);
 
     public TableIdRouter(List<RouteRule> routingRules) {
         this.routes = new ArrayList<>();
+        // 遍历用户传入的 RouteRule 列表。
         for (RouteRule rule : routingRules) {
             try {
                 String tableInclusions = rule.sourceTable;
+                // 将规则中的 sourceTable 正则表达式编译为 Selectors。
                 Selectors selectors =
                         new Selectors.SelectorsBuilder().includeTables(tableInclusions).build();
                 routes.add(new Tuple3<>(selectors, rule.sinkTable, rule.replaceSymbol));
@@ -72,11 +89,12 @@ public class TableIdRouter {
                                     }
                                 });
     }
-
+    // 直接从缓存中获取 sourceTableId 对应的目标 ID 列表。如果缓存中没有，会自动触发加载逻辑。
     public List<TableId> route(TableId sourceTableId) {
         return routingCache.getUnchecked(sourceTableId);
     }
 
+    // 实际执行路由算法的内部私有方法
     private List<TableId> calculateRoute(TableId sourceTableId) {
         List<TableId> routedTableIds =
                 routes.stream()
@@ -84,11 +102,12 @@ public class TableIdRouter {
                         .map(route -> resolveReplacement(sourceTableId, route))
                         .collect(Collectors.toList());
         if (routedTableIds.isEmpty()) {
+            // 如果没有任何规则匹配，默认将数据发送到与源表名同名的目标表（即 routedTableIds.add(sourceTableId)）
             routedTableIds.add(sourceTableId);
         }
         return routedTableIds;
     }
-
+    // 处理目标表名的占位符替换。
     private TableId resolveReplacement(
             TableId originalTable, Tuple3<Selectors, String, String> route) {
         if (route.f2 != null) {
@@ -107,6 +126,7 @@ public class TableIdRouter {
      * @param tableIdSet The tables need to be grouped by the router
      * @return The tables grouped by the router
      */
+    // 将源表集合按规则进行分组。
     public List<Set<TableId>> groupSourceTablesByRouteRule(Set<TableId> tableIdSet) {
         if (routes.isEmpty()) {
             return new ArrayList<>();

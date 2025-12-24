@@ -49,18 +49,28 @@ import java.util.Optional;
  * Operator for processing events from {@link SchemaOperator} before {@link EventPartitioner} with
  * regular topology.
  */
+// 主要作用是**“为物理分区做准备”**。它负责处理所有流入的事件（数据变更、结构变更、刷新事件），并根据事件类型决定如何将它们路由到下游的并行子任务中。
+// 哈希预计算：对于数据变更（DataChangeEvent），它计算每条数据的主键哈希值，并确定该数据所属的下游子任务索引。
+// 事件广播：对于管理类事件（SchemaChangeEvent 和 FlushEvent），它负责将事件“广播”给下游所有的并行子任务，确保整个流水线的状态同步。
+// Schema 动态响应：它持有一个 SchemaEvolutionClient，当表结构发生变化时，它能动态获取最新的 Schema 并重新构造哈希函数，确保分区的准确性。
+
 @Internal
 public class RegularPrePartitionOperator extends AbstractStreamOperator<PartitioningEvent>
         implements OneInputStreamOperator<Event, PartitioningEvent>, Serializable {
 
     private static final long serialVersionUID = 1L;
+    // 缓存过期时间（设置为 1 天）。用于清理长时间不活跃表的哈希函数缓存。
     private static final Duration CACHE_EXPIRE_DURATION = Duration.ofDays(1);
-
+    // 关联的 SchemaOperator 的唯一标识符，
+    // 用于向 Coordinator 请求最新的 Schema 信息。
     private final OperatorID schemaOperatorId;
+    // 下游算子（通常是 Sink 或分区处理器）的并行度，用于哈希取模运算。
     private final int downstreamParallelism;
+    // 哈希函数提供者，定义了如何根据表 ID 和 Schema 生成具体的哈希算法。
     private final HashFunctionProvider<DataChangeEvent> hashFunctionProvider;
-
+    // 内部 RPC 客户端，负责与 SchemaRegistry（通常在 Coordinator 端）通信，拉取最新的表结构。
     private transient SchemaEvolutionClient schemaEvolutionClient;
+    // 缓存了每个表对应的 HashFunction，避免对每条数据都进行复杂的哈希函数初始化操作。
     private transient LoadingCache<TableId, HashFunction<DataChangeEvent>> cachedHashFunctions;
 
     public RegularPrePartitionOperator(
@@ -76,6 +86,7 @@ public class RegularPrePartitionOperator extends AbstractStreamOperator<Partitio
     @Override
     public void open() throws Exception {
         super.open();
+        // 获取 Coordinator 的网关（Gateway）
         TaskOperatorEventGateway toCoordinator =
                 getContainingTask().getEnvironment().getOperatorCoordinatorEventGateway();
         schemaEvolutionClient = new SchemaEvolutionClient(toCoordinator, schemaOperatorId);
@@ -90,6 +101,7 @@ public class RegularPrePartitionOperator extends AbstractStreamOperator<Partitio
             TableId tableId = ((SchemaChangeEvent) event).tableId();
             cachedHashFunctions.put(tableId, recreateHashFunction(tableId));
             // Broadcast SchemaChangeEvent
+            // 将 DDL 事件发送给所有下游
             broadcastEvent(event);
         } else if (event instanceof FlushEvent) {
             // Broadcast FlushEvent
@@ -101,6 +113,10 @@ public class RegularPrePartitionOperator extends AbstractStreamOperator<Partitio
     }
 
     private void partitionBy(DataChangeEvent dataChangeEvent) throws Exception {
+        // 从缓存中获取当前表的哈希函数
+        // 计算该行数据的哈希值
+        // 对 downstreamParallelism 取模，得到目标分区索引
+        // 封装成 PartitioningEvent 发送至下游
         output.collect(
                 new StreamRecord<>(
                         PartitioningEvent.ofRegular(
@@ -110,7 +126,8 @@ public class RegularPrePartitionOperator extends AbstractStreamOperator<Partitio
                                                 .hashcode(dataChangeEvent)
                                         % downstreamParallelism)));
     }
-
+    // 模拟广播行为
+    // 循环 downstreamParallelism 次，为每个下游子任务创建一个包含该事件的 PartitioningEvent
     private void broadcastEvent(Event toBroadcast) {
         for (int i = 0; i < downstreamParallelism; i++) {
             // Deep-copying each event is required since downstream subTasks might run in the same
@@ -119,7 +136,7 @@ public class RegularPrePartitionOperator extends AbstractStreamOperator<Partitio
             output.collect(new StreamRecord<>(PartitioningEvent.ofRegular(copiedEvent, i)));
         }
     }
-
+    // 通过 RPC 向中央注册表请求表结构。
     private Schema loadLatestSchemaFromRegistry(TableId tableId) {
         Optional<Schema> schema;
         try {

@@ -72,6 +72,16 @@ import static org.apache.flink.cdc.runtime.operators.schema.common.CoordinationR
  * These abilities are done by overriding abstract methods of {@link SchemaRegistry}. All methods
  * will run in given {@link ExecutorService} asynchronously except {@code SchemaRegistry#restore}.
  */
+// 一个抽象的中心化元数据注册中心。
+// 它作为 OperatorCoordinator 的实现，运行在 JobManager 端，是整个 CDC 管道处理 Schema 演化（Schema Evolution）的“大脑”。
+// 核心职责是协调和管理全表结构的变更。其具体作用包括：
+// 元数据存储与版本管理：维护源表（Original Schema）和演变后表（Evolved Schema）的历史版本。
+// 请求响应中心：处理来自下游 SinkWriter 或 SchemaEvolutionClient 的元数据查询请求。
+// DDL 协调执行：通过 MetadataApplier 将最新的 Schema 变更应用到外部目标系统（如数据库、数据湖）。
+// 同步对齐（Flush 机制）：在分布式环境下，协调多个上游算子暂停数据流，确保 DDL 执行时数据的强一致性。
+// 状态持久化：支持 Flink 的 Checkpoint 机制，确保元数据管理器在作业失败重启后能恢复到一致的状态。
+
+
 @Internal
 public abstract class SchemaRegistry implements OperatorCoordinator, CoordinationRequestHandler {
 
@@ -80,21 +90,33 @@ public abstract class SchemaRegistry implements OperatorCoordinator, Coordinatio
     // -------------------------
     // Static fields that got bind after construction
     // -------------------------
+    // Flink 提供的协调器上下文，用于获取并行度、上报作业失败或获取类加载器
     protected final OperatorCoordinator.Context context;
+    // 算子名称，主要用于日志记录和监控。
     protected final String operatorName;
+    // 单线程事件循环执行器。所有的请求处理、DDL 执行都在此线程中顺序执行，保证了线程安全和顺序性。
     protected final ExecutorService coordinatorExecutor;
+    // DDL 落地执行器，负责在目标端（如 StarRocks/Doris）执行真实的 SQL。
     protected final MetadataApplier metadataApplier;
+    // 远程调用超时时间，防止 DDL 同步过程无限期卡死。
     protected final Duration rpcTimeout;
+    // 路由规则，用于将上游源表 TableId 映射为下游目标表 TableId
     protected final List<RouteRule> routingRules;
+    // Schema 变更策略（如 EVOLVE, IGNORE, EXCEPTION）
     protected final SchemaChangeBehavior behavior;
 
     // -------------------------
     // Dynamically initialized transient fields (after coordinator starts)
     // -------------------------
+    // 记录当前作业的并行度
     protected transient int currentParallelism;
+    // 记录当前已注册并存活的下游 Sink 算子的 Subtask ID 集合
     protected transient Set<Integer> activeSinkWriters;
+    // 记录子任务失败的原因，方便排查由于 Schema 不一致导致的崩溃。
     protected transient Map<Integer, Throwable> failedReasons;
+    // 核心内存数据库，存储所有表的版本化 Schema 信息
     protected transient SchemaManager schemaManager;
+    // 路由处理器，根据 routingRules 执行实际的 TableId 转换
     protected transient TableIdRouter router;
 
     protected SchemaRegistry(
@@ -117,12 +139,16 @@ public abstract class SchemaRegistry implements OperatorCoordinator, Coordinatio
     // ---------------
     // Lifecycle hooks
     // ---------------
+    // start() 方法在其生命周期中仅执行一次，负责初始化运行时的关键数据结构。
     @Override
     public void start() throws Exception {
         LOG.info("Starting SchemaRegistry - {}.", operatorName);
+        // SchemaRegistry 需要知道下游有多少个 SinkWriter 子任务。
+        // 在分布式 DDL 对齐时，它必须等待所有（例如 10 个）并行子任务都上报“刷新成功（Flush Success）”后，才能认为全局对齐完成。
         this.currentParallelism = context.currentParallelism();
         this.activeSinkWriters = ConcurrentHashMap.newKeySet();
         this.failedReasons = new ConcurrentHashMap<>();
+        // 初始化 Schema 管理器（单例/状态恢复判断）
         if (this.schemaManager == null) {
             this.schemaManager = new SchemaManager();
         }
@@ -155,6 +181,8 @@ public abstract class SchemaRegistry implements OperatorCoordinator, Coordinatio
     // ------------------------------------
 
     /** Overridable handler for {@link SinkWriterRegisterEvent}s. */
+    // 处理下游 Sink 算子注册事件 的回调方法
+    // 在 Flink CDC 的协调机制中，这是一个至关重要的步骤，因为它建立了协调器对下游并行任务的感知。
     protected void handleSinkWriterRegisterEvent(SinkWriterRegisterEvent event) throws Exception {
         LOG.info("Sink subtask {} already registered.", event.getSubtask());
         activeSinkWriters.add(event.getSubtask());
@@ -164,12 +192,17 @@ public abstract class SchemaRegistry implements OperatorCoordinator, Coordinatio
     protected abstract void handleFlushSuccessEvent(FlushSuccessEvent event) throws Exception;
 
     /** Overridable handler for {@link GetEvolvedSchemaRequest}s. */
+    // 处理来自下游（通常是 Sink 端或其 Client）的 Schema 查询请求 的核心逻辑。
+    // 其目的是根据请求的版本号，从内存管理器中提取对应的表结构。
     protected void handleGetEvolvedSchemaRequest(
             GetEvolvedSchemaRequest request, CompletableFuture<CoordinationResponse> responseFuture)
             throws Exception {
         LOG.info("Handling evolved schema request: {}", request);
+        // 客户端期望的版本号
         int schemaVersion = request.getSchemaVersion();
+        // 请求的目标表唯一标识
         TableId tableId = request.getTableId();
+        // 当客户端请求 -1（即 LATEST_SCHEMA_VERSION 常量）时，返回该表的最新结构。
         if (schemaVersion == GetEvolvedSchemaRequest.LATEST_SCHEMA_VERSION) {
             responseFuture.complete(
                     wrap(
@@ -192,6 +225,8 @@ public abstract class SchemaRegistry implements OperatorCoordinator, Coordinatio
     }
 
     /** Overridable handler for {@link GetOriginalSchemaRequest}s. */
+    // 处理获取**原始表结构（Original Schema）**请求的逻辑。
+    // 它与之前看到的 handleGetEvolvedSchemaRequest 非常相似，但操作的对象是源头端（Upstream/Source）的元数据。
     protected void handleGetOriginalSchemaRequest(
             GetOriginalSchemaRequest request,
             CompletableFuture<CoordinationResponse> responseFuture)
@@ -238,7 +273,7 @@ public abstract class SchemaRegistry implements OperatorCoordinator, Coordinatio
     // ---------------------------------
     // Event & Request Dispatching Stuff
     // ---------------------------------
-
+    // 它实现了 Flink 框架的 CoordinationRequestHandler 接口，负责将来自算子端的各种查询请求路由到具体的处理逻辑中。
     @Override
     public final CompletableFuture<CoordinationResponse> handleCoordinationRequest(
             CoordinationRequest request) {
@@ -257,7 +292,12 @@ public abstract class SchemaRegistry implements OperatorCoordinator, Coordinatio
                 request);
         return future;
     }
-
+    // 处理**算子事件（Operator Event）**的统一入口。与之前的 handleCoordinationRequest（处理“请求/响应”模式）不同，
+    // 这个方法专门处理从 TaskManager 端的算子（如 Source 或 Sink）主动推送到 JobManager 端的单向通知
+    // 接收来自特定子任务（Subtask）的事件，并确保这些事件在单线程事件循环中处理，以维护元数据的一致性。
+    // int subTaskId: 发送该事件的算子子任务索引（从 0 开始）。这让协调器知道是哪一个并行实例发来的消息。
+    // int attemptNumber: 该子任务的执行尝试次数。用于处理任务失败重试时的陈旧事件过滤。
+    // OperatorEvent event: 具体的事件对象，目前主要处理 FlushSuccessEvent 和 SinkWriterRegisterEvent。
     @Override
     public final void handleEventFromOperator(
             int subTaskId, int attemptNumber, OperatorEvent event) {

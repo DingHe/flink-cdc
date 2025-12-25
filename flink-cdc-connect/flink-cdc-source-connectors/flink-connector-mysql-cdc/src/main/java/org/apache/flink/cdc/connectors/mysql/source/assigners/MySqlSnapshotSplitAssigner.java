@@ -68,27 +68,49 @@ import java.util.stream.Collectors;
  *
  * @see MySqlSourceOptions#SCAN_INCREMENTAL_SNAPSHOT_CHUNK_SIZE
  */
+// Flink CDC MySQL 连接器中极其核心的一个类。
+// 它运行在 Flink 的 JobManager 端（作为 SplitEnumerator 的一部分），专门负责**全量读取阶段（Snapshot Phase）**的分片逻辑。
+// MySqlSnapshotSplitAssigner 的主要职责是实现**增量快照读取算法（Incremental Snapshot Algorithm）**中的分片管理。
+// 表发现与切分：它会自动发现数据库中匹配的表，并利用 MySqlChunkSplitter 根据主键（Primary Key）将一张大表切分成多个较小的“分块（Chunks/Splits）”。
+// 异步切分：为了不阻塞 JobManager 的主线程，它开启了一个异步线程池来执行耗时的 SQL 查询（如查询主键范围）。
+// 分片分配：它管理着哪些分片已经分配给了 TaskManager 上的 Reader，哪些还在排队。
+// 一致性保证：通过记录每个分片完成时的 Binlog 位点，为后续从全量无缝切换到增量（Binlog）阶段打下基础。
+// 容错处理：它支持 Flink 的 Checkpoint 机制，能够将切分进度和状态保存，确保作业失败重启后不重不漏。
+
 public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
     private static final Logger LOG = LoggerFactory.getLogger(MySqlSnapshotSplitAssigner.class);
-
+    // 记录已经完成切分并处理完毕的表 ID 列表。
     private final List<TableId> alreadyProcessedTables;
+    // 已经切分好、但尚未分配给 TaskManager Reader 的分片
     private final List<MySqlSchemalessSnapshotSplit> remainingSplits;
+    // 已经分配给 Reader 正在执行的分片映射表（Key 是分片 ID）
     private final Map<String, MySqlSchemalessSnapshotSplit> assignedSplits;
+    // 缓存表的结构信息（TableChange）。分片本身不带 Schema 以减小状态大小，需要时从这里查找。
     private final Map<TableId, TableChanges.TableChange> tableSchemas;
+    // 记录每个分片执行完毕后的 Binlog 偏移量。
+    // 这是增量快照算法判断“高水位”的关键。
     private final Map<String, BinlogOffset> splitFinishedOffsets;
+    // MySQL 数据源的配置信息（如用户名、密码、分片大小 chunkSize 等）
     private final MySqlSourceConfig sourceConfig;
+    //作业的并行度
     private final int currentParallelism;
+    // 待切分的表队列
     private final List<TableId> remainingTables;
     private final boolean isRemainingTablesCheckpointed;
+    // Flink 提供的枚举器上下文，用于与 Flink 运行时交互。
     private final SplitEnumeratorContext<MySqlSplit> enumeratorContext;
 
     private final MySqlPartition partition;
+    // 内部对象锁，用于同步异步切分线程与主分配逻辑之间的交互。
     private final Object lock = new Object();
 
     private volatile Throwable uncaughtSplitterException;
+    //当前分配器的状态（如：正在分配全量、全量已完成、正在分配新增表等）。
     private AssignerStatus assignerStatus;
+    // 实际执行 SQL 进入数据库查询主键范围并进行物理分片的工具类。
     private MySqlChunkSplitter chunkSplitter;
     private boolean isTableIdCaseSensitive;
+    // 单线程线程池，用于异步执行切分任务。
     private ExecutorService executor;
 
     @Nullable private Long checkpointIdToFinish;
@@ -186,13 +208,15 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
         captureNewlyAddedTables();
         startAsynchronouslySplit();
     }
-
+    // 核心职责是确定当前作业到底需要处理哪些表。
+    // 它不仅在作业初次启动时运行，还在从检查点（Checkpoint）或保存点（Savepoint）恢复时起着关键的补偿作用。
     private void discoveryCaptureTables() {
         // discovery the tables lazily
         if (needToDiscoveryTables()) {
             long start = System.currentTimeMillis();
             LOG.debug("The remainingTables is empty, start to discovery tables");
             try (JdbcConnection jdbc = DebeziumUtils.openJdbcConnection(sourceConfig)) {
+                // 读取 MySQL 的元数据，并根据用户配置的 table.include.list（包含列表）或 table.exclude.list（排除列表）进行正则匹配，过滤出最终要同步的表。
                 final List<TableId> discoverTables =
                         DebeziumUtils.discoverCapturedTables(jdbc, sourceConfig);
                 this.remainingTables.addAll(discoverTables);
@@ -206,11 +230,15 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
         }
         // when restore the job from legacy savepoint, the legacy state may haven't snapshot
         // remaining tables, discovery remaining table here
+        // 从旧版本或特定状态恢复的补偿逻辑
+        // 如果恢复时发现状态中没有保存 remainingTables 列表（可能是由于版本升级或特定配置），且快照分配还没结束，就需要进入补偿模式。
+        //
         else if (!isRemainingTablesCheckpointed
                 && !AssignerStatus.isSnapshotAssigningFinished(assignerStatus)) {
             try (JdbcConnection jdbc = DebeziumUtils.openJdbcConnection(sourceConfig)) {
                 final List<TableId> discoverTables =
                         DebeziumUtils.discoverCapturedTables(jdbc, sourceConfig);
+                // 排除已处理的表
                 discoverTables.removeAll(alreadyProcessedTables);
                 this.remainingTables.addAll(discoverTables);
                 this.isTableIdCaseSensitive = DebeziumUtils.isTableIdCaseSensitive(jdbc);
@@ -220,17 +248,21 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
             }
         }
     }
-
+    // flink CDC 实现**动态加表（Dynamic Table Discovery）**的核心方法。
+    // 它允许作业在不停止的情况下，自动识别数据库中新增的表，并为其启动“增量快照”流程，同时清理掉不再需要同步的表。
     private void captureNewlyAddedTables() {
         // Don't scan newly added table in snapshot mode.
+        // 用户是否开启了扫描新表的功能
         if (sourceConfig.isScanNewlyAddedTableEnabled()
                 && !sourceConfig.getStartupOptions().isSnapshotOnly()
+               // 只有当作业已经完成了初始的全量读取，进入到增量（Binlog）阶段后，才会触发这个检测逻辑。
                 && AssignerStatus.isAssigningFinished(assignerStatus)) {
             // check whether we got newly added tables
             try (JdbcConnection jdbc = DebeziumUtils.openJdbcConnection(sourceConfig)) {
                 final List<TableId> currentCapturedTables =
                         DebeziumUtils.discoverCapturedTables(jdbc, sourceConfig);
                 final Set<TableId> previousCapturedTables = new HashSet<>();
+                // 汇总 Flink 状态中记录的所有表，形成“旧表清单”。
                 List<TableId> tablesInRemainingSplits =
                         remainingSplits.stream()
                                 .map(MySqlSnapshotSplit::getTableId)
@@ -244,10 +276,12 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
                 tablesToRemove.removeAll(currentCapturedTables);
 
                 // Get the newly added tables
+                // 数据库里新出现的，且 Flink 状态里还没记录的表
                 currentCapturedTables.removeAll(previousCapturedTables);
                 List<TableId> newlyAddedTables = currentCapturedTables;
 
                 // case 1: there are old tables to remove from state
+                // 如果用户修改了配置，去掉了某些表的同步，这段逻辑会确保 Flink 的内存状态（assignedSplits、tableSchemas 等）被清理干净，避免资源浪费和潜在的报错
                 if (!tablesToRemove.isEmpty()) {
 
                     // remove unassigned tables/splits if it does not satisfy new table filter
@@ -270,6 +304,8 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
                 }
 
                 // case 2: there are new tables to add
+                // 状态机的切换。它会告诉 Enumerator，现在有一批新表需要像作业刚启动时那样，先进行一次“快照切分（Snapshot Splitting）”，
+                // 读取存量数据，然后再合并到当前的 Binlog 流中。
                 if (!newlyAddedTables.isEmpty()) {
                     // if job is still in snapshot reading phase, directly add all newly added
                     // tables
@@ -301,33 +337,44 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
             executor.submit(this::splitChunksForRemainingTables);
         }
     }
-
+    // 针对一张指定的 MySQL 表，利用主键将其物理切分为多个分片（Chunks），并把这些分片放入待分配队列中。
+    // 由于一张大表可能包含数亿行数据，一次性切分所有分片会产生巨大的内存压力和长事务。因此，chunkSplitter 采用分批切分的模式。
     private void splitTable(TableId nextTable) {
         LOG.info("Start splitting table {} into chunks...", nextTable);
         long start = System.currentTimeMillis();
+        // 记录该表总共被切成了多少个分片
         int chunkNum = 0;
+        // 标记位。由于同一张表的快照分片结构相同，只需记录一次 Schema 信息即可。
         boolean hasRecordSchema = false;
         // split the given table into chunks (snapshot splits)
         do {
             synchronized (lock) {
                 List<MySqlSnapshotSplit> splits;
                 try {
+                    // 它会根据表的主键范围（PK Range）计算出一组切片。
+                    // 例如，它会执行类似 SHOW MASTER STATUS 和主键采样，确定第一批切片的边界（如 ID 从 1 到 1000）。
                     splits = chunkSplitter.splitChunks(partition, nextTable);
                 } catch (Exception e) {
                     throw new IllegalStateException(
                             "Error when splitting chunks for " + nextTable, e);
                 }
-
+                // 从第一个分片中提取表的结构（Schema）信息并存入全局的 tableSchemas 缓存中。
+                // Flink CDC 的分片在传输过程中为了减小体积，通常是 Schemaless（无 Schema）的。
+                // 但在分配器端必须保存一份完整的 Schema，以便后续分发给 TaskManager 时可以重新拼装。
                 if (!hasRecordSchema && !splits.isEmpty()) {
                     hasRecordSchema = true;
                     final Map<TableId, TableChanges.TableChange> tableSchema = new HashMap<>();
                     tableSchema.putAll(splits.iterator().next().getTableSchemas());
                     tableSchemas.putAll(tableSchema);
                 }
-
+                // 转换并加入待分配队列
                 for (MySqlSnapshotSplit split : splits) {
+                    // 将分片对象转换为更轻量级的“无 Schema”版本，准备分发。
+                    // isAssignUnboundedChunkFirst: 这是一个优化策略。如果一个分片没有结束边界（通常是最后一个分片），
+                    // 根据配置决定是否将其插入队列的最前面（index 0），以便优先被消费
                     MySqlSchemalessSnapshotSplit schemalessSnapshotSplit =
                             split.toSchemalessSnapshotSplit();
+                    //  优先分配无界分片
                     if (sourceConfig.isAssignUnboundedChunkFirst() && split.getSplitEnd() == null) {
                         // assign unbounded split first
                         remainingSplits.add(0, schemalessSnapshotSplit);
@@ -337,6 +384,7 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
                 }
 
                 chunkNum += splits.size();
+                // 如果 chunkSplitter 已经遍历完了整张表的主键空间，说明该表切分完毕，从待切分表列表中移除。
                 if (!chunkSplitter.hasNextChunk()) {
                     remainingTables.remove(nextTable);
                 }
@@ -547,6 +595,7 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
     }
 
     /** Indicates current assigner need to discovery tables or not. */
+    // 通常在 remainingTables（待处理表）、remainingSplits（待分配分片）和 alreadyProcessedTables（已处理表）都为空时返回 true。这标志着作业刚刚开始。
     public boolean needToDiscoveryTables() {
         return remainingTables.isEmpty()
                 && remainingSplits.isEmpty()
@@ -574,11 +623,13 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
     private boolean allSnapshotSplitsFinished() {
         return noMoreSplits() && assignedSplits.size() == splitFinishedOffsets.size();
     }
-
+    // 在后台线程池中运行，负责最耗时的任务：扫描 MySQL 表的主键范围，并将大表切分成一个个小的分片（Chunks/Splits）。
     private void splitChunksForRemainingTables() {
         try {
             // restore from a checkpoint and start to split the table from the previous
             // checkpoint
+            // 如果作业是从 Checkpoint 恢复的，可能当时某张大表只切分了一半。chunkSplitter.hasNextChunk() 会检查分切器内部是否还保存着上一次未完成的切分状态。
+            // 如果是，则立即调用 splitTable 继续处理这张表，确保切分逻辑的连续性。
             if (chunkSplitter.hasNextChunk()) {
                 LOG.info(
                         "Start splitting remaining chunks for table {}",
@@ -587,6 +638,7 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
             }
 
             // split the remaining tables
+            // 依次处理所有排队中的表
             for (TableId nextTable : remainingTables) {
                 splitTable(nextTable);
             }

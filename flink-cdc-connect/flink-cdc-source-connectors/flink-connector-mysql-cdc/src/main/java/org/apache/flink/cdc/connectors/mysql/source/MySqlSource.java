@@ -168,25 +168,33 @@ public class MySqlSource<T>
             return Boundedness.CONTINUOUS_UNBOUNDED;
         }
     }
-
+    // 运行在 TaskManager 上。它的主要职责是初始化一个读取器，负责从 MySQL 数据库（包括快照阶段和 Binlog 阶段）抓取数据。
     @Override
     public SourceReader<T, MySqlSplit> createReader(SourceReaderContext readerContext)
             throws Exception {
         // create source config for the given subtask (e.g. unique server id)
         MySqlSourceConfig sourceConfig =
                 configFactory.createConfig(readerContext.getIndexOfSubtask());
+        // 创建一个支持 Future 完成通知的阻塞队列
+        // 这是 FLIP-27 架构的核心组件。
+        // 它充当了 SplitReader（负责拉取数据） 和 SourceReader（负责分发数据） 之间的桥梁。底层线程将读取到的数据放入此队列，主线程从中消费。
         FutureCompletingBlockingQueue<RecordsWithSplitIds<SourceRecords>> elementsQueue =
                 new FutureCompletingBlockingQueue<>();
-
+        // 通过反射手段从 readerContext 中获取 Flink 的 MetricGroup 对象。
         final Method metricGroupMethod = readerContext.getClass().getMethod("metricGroup");
         metricGroupMethod.setAccessible(true);
         final MetricGroup metricGroup = (MetricGroup) metricGroupMethod.invoke(readerContext);
-
+        // 创建 MySQL 插件特有的指标管理类，并向 Flink 系统注册这些指标。
+        //
         final MySqlSourceReaderMetrics sourceReaderMetrics =
                 new MySqlSourceReaderMetrics(metricGroup);
         sourceReaderMetrics.registerMetrics();
+        // 将 Flink 标准的 readerContext 包装成 MySQL 插件专用的上下文对象，方便在后续流程中携带 MySQL 特有的状态。
         MySqlSourceReaderContext mySqlSourceReaderContext =
                 new MySqlSourceReaderContext(readerContext);
+        // 定义一个 Lambda 表达式，用于后续创建真正的“拆分读取器（SplitReader）
+        // MySqlSplitReader 是真正干活的类，它内部持有 JDBC 连接或 Binlog 客户端。这里传入了配置、子任务索引和 快照钩子 (snapshotHooks)。
+        // 快照钩子允许在全量读取阶段执行自定义逻辑（如处理表锁或一致性位点）。
         Supplier<MySqlSplitReader> splitReaderSupplier =
                 () ->
                         new MySqlSplitReader(
@@ -194,6 +202,7 @@ public class MySqlSource<T>
                                 readerContext.getIndexOfSubtask(),
                                 mySqlSourceReaderContext,
                                 snapshotHooks);
+        // 实例化最终的 MySqlSourceReader 并返回给 Flink 运行时。
         return new MySqlSourceReader<>(
                 elementsQueue,
                 splitReaderSupplier,
@@ -202,17 +211,22 @@ public class MySqlSource<T>
                 mySqlSourceReaderContext,
                 sourceConfig);
     }
-
+    // 是 Flink CDC MySQL 连接器在 JobManager 端运行的核心入口。
+    // 它的主要职责是充当整个数据读取任务的“大脑”或“协调员”，负责发现要读取的表、将表拆分成小的分片（Splits），并决定如何将这些分片分配给各个 TaskManager 上的 Reader。
     @Override
     public SplitEnumerator<MySqlSplit, PendingSplitsState> createEnumerator(
             SplitEnumeratorContext<MySqlSplit> enumContext) {
+        // Enumerator 运行在 JobManager 上，它需要自己的数据库连接配置。
+        // 这里传入 0 和特殊的服务器名称，是为了确保其标识符的唯一性，避免与 Reader 的连接混淆。
         MySqlSourceConfig sourceConfig = configFactory.createConfig(0, ENUMERATOR_SERVER_NAME);
 
         final MySqlValidator validator = new MySqlValidator(sourceConfig);
         validator.validate();
-
+        // 根据启动模式选择分片分配器 (SplitAssigner)
+        //
         final MySqlSplitAssigner splitAssigner;
         // In snapshot-only startup option, only split snapshots.
+        // 仅快照模式 (Snapshot Only)
         if (sourceConfig.getStartupOptions().isSnapshotOnly()) {
             try (JdbcConnection jdbc = DebeziumUtils.openJdbcConnection(sourceConfig)) {
                 boolean isTableIdCaseSensitive = DebeziumUtils.isTableIdCaseSensitive(jdbc);
@@ -227,6 +241,8 @@ public class MySqlSource<T>
                 throw new FlinkRuntimeException(
                         "Failed to discover captured tables for enumerator", e);
             }
+         // 混合模式 (Hybrid，默认常用模式)
+         // 典型的 CDC 场景——先读存量数据（全量），读完后自动无缝切换到读取 Binlog（增量）。
         } else if (!sourceConfig.getStartupOptions().isStreamOnly()) {
             try (JdbcConnection jdbc = DebeziumUtils.openJdbcConnection(sourceConfig)) {
                 boolean isTableIdCaseSensitive = DebeziumUtils.isTableIdCaseSensitive(jdbc);
@@ -241,6 +257,7 @@ public class MySqlSource<T>
                 throw new FlinkRuntimeException(
                         "Failed to discover captured tables for enumerator", e);
             }
+        // 仅流模式 (Stream Only)
         } else {
             splitAssigner = new MySqlBinlogSplitAssigner(sourceConfig);
         }

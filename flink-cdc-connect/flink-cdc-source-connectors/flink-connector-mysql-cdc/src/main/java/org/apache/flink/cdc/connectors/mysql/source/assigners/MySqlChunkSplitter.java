@@ -56,23 +56,37 @@ import java.util.Optional;
 import static java.math.BigDecimal.ROUND_CEILING;
 
 /** The {@link ChunkSplitter} implementation for MySQL. */
+// MySqlChunkSplitter 是 Flink CDC 中针对 MySQL 的 ChunkSplitter 接口的具体实现。
+// 它的核心任务是根据表的主键或指定的列，将 MySQL 表的数据划分为多个分片（Chunks），以便在快照阶段进行高效、无锁的并发读取。
+// 均匀分片优化：如果主键是连续增长的数字（如 BIGINT 自增 ID），它会通过数学计算直接得出所有分片范围，效率极高。
+// 不均匀分片降级：如果主键分布不均（如存在大量空洞），它会通过 SELECT 查询动态寻找下一个分片的边界。
+// 状态恢复：配合 Flink Checkpoint，它可以记录当前切分到哪张表、哪个位置，保证作业重启后不重不漏。
+// 资源管理：负责建立与 MySQL 的 JDBC 连接，并分析表结构、获取主键范围和行数估算。
 public class MySqlChunkSplitter implements ChunkSplitter {
 
     private static final Logger LOG = LoggerFactory.getLogger(MySqlChunkSplitter.class);
     private final Object lock = new Object();
-
+    // 存储 MySQL 连接信息、分片大小（split-size）、分布因子上限等配置。
     private final MySqlSourceConfig sourceConfig;
+    // 用于获取 MySQL 的表结构映射信息
     private final MySqlSchema mySqlSchema;
-
+    // 记录当前正在切分的表。如果为 null，表示当前没有正在切分的表。
     @Nullable private TableId currentSplittingTableId;
+    // 下一个分片的起始边界（对应数据库中的主键值）
     @Nullable private ChunkSplitterState.ChunkBound nextChunkStart;
+    // 记录当前表切分出的分片序号（从 0 开始自增）
     @Nullable private Integer nextChunkId;
-
+    // 用于执行 SQL 查询（如查询 Min/Max 值、估算行数、探测分片边界）
     private JdbcConnection jdbcConnection;
+    // Debezium 格式的表对象，包含列定义
     private Table currentSplittingTable;
+    // 实际用于分片的列（通常是主键）
     private Column splitColumn;
+    // 分片列的逻辑类型（如 BIGINT）
     private RowType splitType;
+    // 存储分片列的当前最小值和最大值（数组长度为 2）
     private Object[] minMaxOfSplitColumn;
+    // 通过 SHOW TABLE STATUS 等方式获取的表估算行数，用于计算分布因子。
     private long approximateRowCnt;
 
     public MySqlChunkSplitter(MySqlSchema mySqlSchema, MySqlSourceConfig sourceConfig) {
@@ -108,21 +122,26 @@ public class MySqlChunkSplitter implements ChunkSplitter {
     public void open() {
         this.jdbcConnection = DebeziumUtils.openJdbcConnection(sourceConfig);
     }
-
+    // MySqlChunkSplitter 的逻辑枢纽，它决定了对一张表是采用 “一次性全量均匀切分” 还是 “逐个动态非均匀切分”。
     @Override
     public List<MySqlSnapshotSplit> splitChunks(MySqlPartition partition, TableId tableId)
             throws Exception {
+        // 检查当前是否正在切分某个表。
         if (!hasNextChunk()) {
+            // 连接数据库，获取该表的 Min/Max 值、主键列、类型及估算行数（为切分做数据准备）。
             analyzeTable(partition, tableId);
+            // 计算主键的分布密度。如果主键是连续的数字（如自增 ID），它会利用数学计算直接生成所有分片。
             Optional<List<MySqlSnapshotSplit>> evenlySplitChunks =
                     trySplitAllEvenlySizedChunks(partition, tableId);
             if (evenlySplitChunks.isPresent()) {
                 return evenlySplitChunks.get();
             } else {
+             // 如果数据分布不均（有大量空洞），则进入增量动态切分模式
                 synchronized (lock) {
                     this.currentSplittingTableId = tableId;
                     this.nextChunkStart = ChunkSplitterState.ChunkBound.START_BOUND;
                     this.nextChunkId = 0;
+                    // 通过查询数据库，找到当前起始点之后的第 N 条数据作为边界，仅切出一个分片并返回。
                     return Collections.singletonList(
                             splitOneUnevenlySizedChunk(partition, tableId));
                 }
@@ -131,6 +150,7 @@ public class MySqlChunkSplitter implements ChunkSplitter {
             Preconditions.checkState(
                     currentSplittingTableId.equals(tableId),
                     "Can not split a new table before the previous table splitting finish.");
+            // 这种情况通常发生在从 Checkpoint 恢复后。此时虽然知道在切哪张表，但内存中的表结构信息丢了，需要重新调用 analyzeTable 加载元数据
             if (currentSplittingTable == null) {
                 analyzeTable(partition, currentSplittingTableId);
             }
@@ -141,18 +161,27 @@ public class MySqlChunkSplitter implements ChunkSplitter {
     }
 
     /** Analyze the meta information for given table. */
+    // 主要作用是在对一张大表进行物理分片（Chunking）之前，先通过 JDBC 连接到数据库，获取该表的元数据（Metadata）、分片参考列以及数据的分布统计信息。
     private void analyzeTable(MySqlPartition partition, TableId tableId) {
         try {
+            // 获取目标表的 Debezium Table 对象
             currentSplittingTable =
                     mySqlSchema.getTableSchema(partition, jdbcConnection, tableId).getTable();
+            // 确定哪一列将作为分片的依据（通常是主键）
+            // 首先检查用户是否在 sourceConfig 中手动指定了分片列（Chunk Key）
+            // 如果没有指定，会自动寻找表的主键（Primary Key）
+            // 如果是复合主键，默认选取第一列。这一列的值将决定数据切分的边界。
             splitColumn =
                     ChunkUtils.getChunkKeyColumn(
                             currentSplittingTable, sourceConfig.getChunkKeyColumns());
+            // 将数据库的物理类型转换为 Flink 内部的 RowType（逻辑类型）
             splitType =
                     ChunkUtils.getChunkKeyColumnType(
                             splitColumn, sourceConfig.isTreatTinyInt1AsBoolean());
+            // 查询分片列的最大最小值 (Min/Max Query)
             minMaxOfSplitColumn =
                     StatementUtils.queryMinMax(jdbcConnection, tableId, splitColumn.name());
+            // 获取表的近似总记录数。
             approximateRowCnt = StatementUtils.queryApproximateRowCnt(jdbcConnection, tableId);
         } catch (Exception e) {
             throw new RuntimeException("Fail to analyze table in chunk splitter.", e);
@@ -160,9 +189,12 @@ public class MySqlChunkSplitter implements ChunkSplitter {
     }
 
     /** Generates one snapshot split (chunk) for the give table path. */
+    // 当系统判断表的主键分布不均匀（存在巨大空洞）时，会调用此方法，通过逐个探测边界的方式来切分数据。
     private MySqlSnapshotSplit splitOneUnevenlySizedChunk(MySqlPartition partition, TableId tableId)
             throws SQLException {
+        // 获取配置的分片大小（即每个分片包含多少行数据，默认 8096）
         final int chunkSize = sourceConfig.getSplitSize();
+        // 获取当前待切分块的起始边界值。如果是第一次切分，则为 null
         final Object chunkStartVal = nextChunkStart.getValue();
         LOG.info(
                 "Use unevenly-sized chunks for table {}, the chunk size is {} from {}",
@@ -172,6 +204,8 @@ public class MySqlChunkSplitter implements ChunkSplitter {
                         ? "null"
                         : chunkStartVal.toString());
         // we start from [null, min + chunk_size) and avoid [null, min)
+        // 由于数据分布不均，不能简单用加法计算终点。该方法内部会执行 SQL（通常是 SELECT ... FROM ... WHERE id > current_start ORDER BY id LIMIT 1 OFFSET chunkSize-1），
+        // 在数据库中实地寻找第 chunkSize 条记录的主键值。
         Object chunkEnd =
                 nextChunkEnd(
                         jdbcConnection,
@@ -215,11 +249,14 @@ public class MySqlChunkSplitter implements ChunkSplitter {
      * using evenly-sized chunks which is much efficient, using unevenly-sized chunks which will
      * request many queries and is not efficient.
      */
+    // 目的是判断一张表是否可以通过数学计算（步长推导）来一次性完成全部分片，而不需要频繁地查询数据库。
     private Optional<List<MySqlSnapshotSplit>> trySplitAllEvenlySizedChunks(
             MySqlPartition partition, TableId tableId) {
         LOG.debug("Try evenly splitting table {} into chunks", tableId);
         final Object min = minMaxOfSplitColumn[0];
         final Object max = minMaxOfSplitColumn[1];
+        // 如果表里没有数据（min/max 为空），或者只有一行数据（min 等于 max）
+        // 不需要复杂的切分逻辑，直接将整张表作为一个“全表扫描分片”（ChunkRange.all()）返回。
         if (min == null || max == null || min.equals(max)) {
             // empty table, or only one row, return full table scan as a chunk
             return Optional.of(
@@ -228,15 +265,18 @@ public class MySqlChunkSplitter implements ChunkSplitter {
         }
 
         final int chunkSize = sourceConfig.getSplitSize();
+        // 调用 getDynamicChunkSize 来判断数据分布是否足够均匀。
         final int dynamicChunkSize =
                 getDynamicChunkSize(tableId, splitColumn, min, max, chunkSize, approximateRowCnt);
         if (dynamicChunkSize != -1) {
             LOG.debug("finish evenly splitting table {} into chunks", tableId);
+            // 执行“均匀分片”优化
             List<ChunkRange> chunks =
                     splitEvenlySizedChunks(
                             tableId, min, max, approximateRowCnt, chunkSize, dynamicChunkSize);
             return Optional.of(generateSplits(partition, tableId, chunks));
         } else {
+            // 主键分布极不均匀（例如主键是随机 UUID 或有巨大的 ID 空洞）
             LOG.debug("beginning unevenly splitting table {} into chunks", tableId);
             return Optional.empty();
         }
